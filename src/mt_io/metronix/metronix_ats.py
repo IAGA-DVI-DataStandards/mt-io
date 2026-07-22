@@ -165,6 +165,7 @@ class ATS(MetronixFileNameMetadata):
         # Look for XML files in the same directory
         xml_files = list(self.fn.parent.glob("*.xml"))
         if len(xml_files) == 1:
+            logger.debug(f"Found metadata XML file: {xml_files[0].name}")
             return xml_files[0]
         elif len(xml_files) > 1:
             # Try to find one matching our run
@@ -177,7 +178,9 @@ class ATS(MetronixFileNameMetadata):
                 f"Multiple XML files found in {self.fn.parent}, using {xml_files[0].name}"
             )
             return xml_files[0]
-        return None
+        else:
+            logger.warning(f"No XML metadata file found in {self.fn.parent}")
+            return None
 
     def has_metadata_file(self) -> bool:
         """
