@@ -56,7 +56,6 @@ from mt_timeseries import ChannelTS
 
 from mt_io.metronix import MetronixFileNameMetadata, MetronixRunXML
 
-
 # =============================================================================
 # Constants
 # =============================================================================

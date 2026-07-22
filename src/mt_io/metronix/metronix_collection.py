@@ -29,7 +29,6 @@ from loguru import logger
 from mt_io.collection import Collection
 from mt_io.metronix import ATS, ATSS
 
-
 # =============================================================================
 
 
@@ -212,7 +211,7 @@ class MetronixCollection(Collection):
             return df
 
         for row in df.itertuples():
-            df.loc[
-                row.Index, "run"
-            ] = f"sr{row.sample_rate:.0f}_{int(row.run.split('_')[1]):0{zeros}}"
+            df.loc[row.Index, "run"] = (
+                f"sr{row.sample_rate:.0f}_{int(row.run.split('_')[1]):0{zeros}}"
+            )
         return df

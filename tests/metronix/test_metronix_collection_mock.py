@@ -22,7 +22,6 @@ import pytest
 
 from mt_io.metronix.metronix_collection import MetronixCollection
 
-
 try:
     pass
 
