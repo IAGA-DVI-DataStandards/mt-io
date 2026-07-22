@@ -48,6 +48,7 @@ from loguru import logger
 from mt_metadata.timeseries import AppliedFilter, Electric, Magnetic, Run
 from mt_metadata.timeseries.filters import ChannelResponse, FrequencyResponseTableFilter
 
+
 # =============================================================================
 SUPPORTED_TS_FILE_TYPES = ["atss", "ats"]
 
@@ -642,7 +643,7 @@ class MetronixRunXML:
     def __repr__(self) -> str:
         return self.__str__()
 
-    def read(self, xml_file: Union[pathlib.Path, str]) -> None:
+    def read(self, xml_file: Union[pathlib.Path, str, None] = None) -> None:
         """
         Parse the Metronix run XML file.
 
@@ -658,10 +659,13 @@ class MetronixRunXML:
         ValueError
             If XML structure is not recognized
         """
-        self.xml_file = pathlib.Path(xml_file)
-        if not self.xml_file.exists():
-            raise FileNotFoundError(f"XML file {self.xml_file} does not exist")
+        if xml_file is not None:
+            self.xml_file = pathlib.Path(xml_file)
+            if not self.xml_file.exists():
+                raise FileNotFoundError(f"XML file {self.xml_file} does not exist")
 
+        if self.xml_file is None:
+            raise ValueError("No XML file specified")
         tree = ET.parse(str(self.xml_file))
         self._root = tree.getroot()
 
@@ -940,7 +944,7 @@ class MetronixRunXML:
 
     def get_scaling_factor(self, channel_id: int) -> float:
         """Get the LSB scaling factor for a channel."""
-        return self._channels.get(channel_id, {}).get("ts_lsb", 1.0)
+        return float(self._channels.get(channel_id, {}).get("ts_lsb", 1.0))
 
     def get_n_samples(self, channel_id: int) -> int:
         """Get number of samples for a channel."""

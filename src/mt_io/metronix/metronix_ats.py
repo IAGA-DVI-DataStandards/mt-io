@@ -56,6 +56,7 @@ from mt_timeseries import ChannelTS
 
 from mt_io.metronix import MetronixFileNameMetadata, MetronixRunXML
 
+
 # =============================================================================
 # Constants
 # =============================================================================
@@ -105,14 +106,19 @@ class ATS(MetronixFileNameMetadata):
     def __init__(
         self,
         fn: Union[str, Path, None] = None,
-        run_xml: MetronixRunXML | None = None,
+        run_xml: MetronixRunXML | str | Path | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(fn=fn, **kwargs)
 
-        self.run_xml = run_xml
         self._channel_id: int | None = None
-
+        if run_xml is not None:
+            if isinstance(run_xml, (str, Path)):
+                self.run_xml = MetronixRunXML(run_xml)
+            else:
+                self.run_xml = run_xml
+        else:
+            self.run_xml = None
         if self.fn is not None and self.run_xml is None:
             if self.has_metadata_file():
                 self.run_xml = MetronixRunXML(self.metadata_fn)
@@ -362,7 +368,7 @@ class ATS(MetronixFileNameMetadata):
             Run identifier.
         """
         if self.fn_exists:
-            return self.fn.parent.name
+            return self.fn.parent.name.replace("-", "_")
         return None
 
     @property
