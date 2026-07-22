@@ -195,6 +195,10 @@ class MetronixFileNameMetadata:
             self.component = self._parse_component(fn_list[4])
             self.sample_rate = self._parse_sample_rate(fn_list[6])
             self.file_type = self._get_file_type(fn)
+        else:
+            raise IndexError(
+                f"File {fn} does not have a valid Metronix extension (.json, .atss, .ats)"
+            )
 
     def _parse_channel_number(self, value: str) -> int:
         """

@@ -25,8 +25,9 @@ from typing import Any, Union
 
 import pandas as pd
 from loguru import logger
-from mth5.io.collection import Collection
-from mth5.io.metronix import ATS, ATSS
+
+from mt_io.collection import Collection
+from mt_io.metronix import ATS, ATSS
 
 
 # =============================================================================

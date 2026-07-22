@@ -21,6 +21,7 @@ import pytest
 
 from mt_io.metronix.metronix_collection import MetronixCollection
 
+
 # =============================================================================
 # Test Data Import Handling
 # =============================================================================
@@ -111,19 +112,19 @@ class TestMetronixCollectionInitialization:
         """Test initialization without file path."""
         collection = MetronixCollection()
         assert collection.file_path is None
-        assert collection.file_ext == ["atss"]
+        assert collection.file_ext == ["atss", "ats"]  # Updated to include .ats files
 
     def test_initialization_with_path(self, temp_dir):
         """Test initialization with file path."""
         collection = MetronixCollection(file_path=temp_dir)
         assert collection.file_path == temp_dir
-        assert collection.file_ext == ["atss"]
+        assert collection.file_ext == ["atss", "ats"]
 
     @requires_test_data
     def test_initialization_with_real_data_path(self, real_data_collection):
         """Test initialization with real data path."""
         assert real_data_collection.file_path == metronix_data_path
-        assert real_data_collection.file_ext == ["atss"]
+        assert real_data_collection.file_ext == ["atss", "ats"]
 
     def test_initialization_with_kwargs(self, temp_dir):
         """Test initialization with additional kwargs."""
@@ -142,7 +143,7 @@ class TestMetronixCollectionProperties:
 
     def test_file_ext_property(self, empty_collection):
         """Test file_ext property."""
-        assert empty_collection.file_ext == ["atss"]
+        assert empty_collection.file_ext == ["atss", "ats"]
 
     def test_inherits_from_collection(self, empty_collection):
         """Test that MetronixCollection inherits from Collection."""
