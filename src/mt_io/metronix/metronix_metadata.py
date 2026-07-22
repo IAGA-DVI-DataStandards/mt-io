@@ -48,7 +48,6 @@ from loguru import logger
 from mt_metadata.timeseries import AppliedFilter, Electric, Magnetic, Run
 from mt_metadata.timeseries.filters import ChannelResponse, FrequencyResponseTableFilter
 
-
 # =============================================================================
 SUPPORTED_TS_FILE_TYPES = ["atss", "ats"]
 
