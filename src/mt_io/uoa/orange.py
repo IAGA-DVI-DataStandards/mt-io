@@ -27,22 +27,22 @@ records data in binary format with minimal header information.
 
 **Sensor Configuration** (Long-Period Only):
     - Magnetic: Bartington Mag-03 fluxgates (or similar)
-      * Full-scale range: ±70,000 nT
-      * 24-bit ADC: ±2^23 counts
-    - Electric: Non-polarizing Pb-PbCl₂ electrodes
-      * Full-scale range: ±100,000 μV / dipole_length
-      * 24-bit ADC: ±2^23 counts
+      * Full-scale range: +/-70,000 nT
+      * 24-bit ADC: +/-2^23 counts
+    - Electric: Non-polarizing Pb-PbCl2 electrodes
+      * Full-scale range: +/-100,000 uV / dipole_length
+      * 24-bit ADC: +/-2^23 counts
 
 **Calibration Formulas** (from Legacy_LP_MT_Process.py):
 
 Magnetic channels (signed, inverted for By):
-    Bx [nT] = (chan0 / 2^23 - 1.0) × 70000.0
-    Bz [nT] = (chan1 / 2^23 - 1.0) × 70000.0
-    By [nT] = -((chan2 / 2^23 - 1.0) × 70000.0)  # Note: inverted
+    Bx [nT] = (chan0 / 2^23 - 1.0) x 70000.0
+    Bz [nT] = (chan1 / 2^23 - 1.0) x 70000.0
+    By [nT] = -((chan2 / 2^23 - 1.0) x 70000.0)  # Note: inverted
 
 Electric channels (signed, inverted, dipole-normalized):
-    Ex [μV/m] = -((chan7 / 2^23 - 1.0) × (100000.0 / dipole_length_ex))
-    Ey [μV/m] = -((chan6 / 2^23 - 1.0) × (100000.0 / dipole_length_ey))
+    Ex [uV/m] = -((chan7 / 2^23 - 1.0) x (100000.0 / dipole_length_ex))
+    Ey [uV/m] = -((chan6 / 2^23 - 1.0) x (100000.0 / dipole_length_ey))
 
 **MTH5 Standard Approach**:
     - Store RAW counts (no calibration applied)
@@ -91,14 +91,14 @@ from mt_timeseries import ChannelTS, RunTS
 
 # ADC characteristics (24-bit sigma-delta, unsigned)
 ADC_BITS = 24
-ADC_MAX_COUNTS = 2**23  # Signed range: ±2^23
-ADC_ZERO = 2**23  # Zero point for unsigned → signed conversion
+ADC_MAX_COUNTS = 2**23  # Signed range: +/-2^23
+ADC_ZERO = 2**23  # Zero point for unsigned -> signed conversion
 
 # Bartington fluxgate full-scale range
-BARTINGTON_FULL_SCALE_NT = 70000.0  # ±70,000 nT
+BARTINGTON_FULL_SCALE_NT = 70000.0  # +/-70,000 nT
 
 # Electric field full-scale (before dipole normalization)
-ELECTRIC_FULL_SCALE_UV = 100000.0  # ±100,000 μV
+ELECTRIC_FULL_SCALE_UV = 100000.0  # +/-100,000 uV
 
 # Sample format constants
 BYTES_PER_SAMPLE = 18  # Total bytes per complete sample (8 channels + 1 extra)
@@ -116,11 +116,11 @@ def create_orange_magnetic_filter(
     """
     Create calibration filter for Orange Box magnetic channels.
 
-    **Formula**: B [nT] = (counts / 2^23 - 1.0) × 70000.0
+    **Formula**: B [nT] = (counts / 2^23 - 1.0) x 70000.0
 
     This is a two-step conversion:
-        1. Unsigned counts → signed normalized: (counts / 2^23 - 1.0) ∈ [-1, +1)
-        2. Normalized → nT: × 70000.0
+        1. Unsigned counts -> signed normalized: (counts / 2^23 - 1.0) in [-1, +1)
+        2. Normalized -> nT: x 70000.0
 
     :param component: Channel component (hx, hy, hz)
     :type component: str
@@ -137,7 +137,7 @@ def create_orange_magnetic_filter(
     mag_filter.units_in = "count"
     mag_filter.units_out = "nanotesla"
 
-    # Combined gain: (1 / 2^23) × 70000 × (±1 for invert)
+    # Combined gain: (1 / 2^23) x 70000 x (+/-1 for invert)
     gain = BARTINGTON_FULL_SCALE_NT / ADC_MAX_COUNTS
     if invert:
         gain = -gain
@@ -149,7 +149,7 @@ def create_orange_magnetic_filter(
 
     mag_filter.comments = (
         f"Orange Box magnetic calibration: {component.upper()} = "
-        f"(counts / 2^23 - 1.0) × {BARTINGTON_FULL_SCALE_NT}"
+        f"(counts / 2^23 - 1.0) x {BARTINGTON_FULL_SCALE_NT}"
     )
     if invert:
         mag_filter.comments += " [inverted]"
@@ -163,12 +163,12 @@ def create_orange_electric_filter(
     """
     Create calibration filter for Orange Box electric channels.
 
-    **Formula**: E [μV/m] = -((counts / 2^23 - 1.0) × (100000.0 / dipole_length))
+    **Formula**: E [uV/m] = -((counts / 2^23 - 1.0) x (100000.0 / dipole_length))
 
     Three-step conversion:
-        1. Unsigned counts → signed normalized: (counts / 2^23 - 1.0) ∈ [-1, +1)
-        2. Normalized → μV: × 100000.0
-        3. Dipole normalization & inversion: -(μV / dipole_length) → μV/m
+        1. Unsigned counts -> signed normalized: (counts / 2^23 - 1.0) in [-1, +1)
+        2. Normalized -> uV: x 100000.0
+        3. Dipole normalization & inversion: -(uV / dipole_length) -> uV/m
 
     :param component: Channel component (ex, ey)
     :type component: str
@@ -185,7 +185,7 @@ def create_orange_electric_filter(
     elec_filter.units_in = "count"
     elec_filter.units_out = "microvolt per meter"
 
-    # Combined gain: -(1 / 2^23) × (100000 / dipole_length)
+    # Combined gain: -(1 / 2^23) x (100000 / dipole_length)
     gain = -(ELECTRIC_FULL_SCALE_UV / ADC_MAX_COUNTS) / dipole_length
 
     elec_filter.gain = gain
@@ -195,7 +195,7 @@ def create_orange_electric_filter(
 
     elec_filter.comments = (
         f"Orange Box electric calibration: {component.upper()} = "
-        f"-((count / 2^23 - 1.0) × (100000 / {dipole_length}))"
+        f"-((count / 2^23 - 1.0) x (100000 / {dipole_length}))"
     )
 
     return elec_filter
