@@ -10,7 +10,8 @@ Instruments Supported
 
 1. **Earth Data Logger PR6-24** (read_uoa)
    - 6-channel broadband/long-period MT system
-   - ASCII format: one file per channel containing microvolts
+   - ASCII or miniSEED, one file per channel, both in microvolts
+   - format detected from the file header, not the extension
    - Hardware: Bz voltage divider (fluxgate only; 15 kOhm/10 kOhm), E-field terminal box (x10 gain)
    - Sensors: LEMI-120 induction coils or Bartington Mag-03 fluxgates
 

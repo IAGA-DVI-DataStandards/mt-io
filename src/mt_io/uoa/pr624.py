@@ -12,9 +12,14 @@ systems paired it with external magnetic sensors, electrodes and analogue
 interface electronics. It writes one file per channel, named
 {station}YYMMDDhhmmss.{CHANNEL}, either in day-numbered folders (001-366)
 or flat. File length is set at acquisition time by mseed_filesize in
-recorder.ini, so it varies between deployments. Values are input voltage in microVolt, one per line, no header.
-The sample rate comes from recorder.ini, the caller, or the gap between
+recorder.ini, so it varies between deployments.
+
+The recorder writes either ASCII or miniSEED to the same file names, so
+the format is detected from the first record header rather than the
+extension. Both hold input voltage in microVolt. ASCII carries no header,
+so its rate comes from recorder.ini, the caller, or the gap between
 consecutive file stamps, snapped to a rate the instrument supports.
+miniSEED carries rate, start time and sample count of its own.
 
 Filter gains are stored forward, physical to recorded, as MTH5 divides by
 them when removing the response:
@@ -316,15 +321,76 @@ def sort_by_timestamp(files: List[Union[str, Path]]) -> List[Path]:
     return [fn for _, fn in stamped] + [fn for _, fn in unstamped]
 
 
+# A miniSEED record opens with a six digit sequence number and a quality code
+MSEED_QUALITY = (b"D", b"R", b"Q", b"M")
+
+
+def is_miniseed(fn: Union[str, Path]) -> bool:
+    """
+    Tell miniSEED apart from ASCII by looking at the first record header.
+
+    The PR6-24 writes either format to the same .BX/.BY/.BZ/.EX/.EY names,
+    so the extension cannot be used to decide.
+
+    :param fn: path to an EDL data file
+    :type fn: str or :class:`pathlib.Path`
+    :return: True if the file starts with a miniSEED record header
+    :rtype: bool
+    """
+    with open(fn, "rb") as data_file:
+        head = data_file.read(8)
+    return len(head) >= 8 and head[:6].isdigit() and head[6:7] in MSEED_QUALITY
+
+
+def read_edl_miniseed(fn: Union[str, Path]):
+    """
+    Read one miniSEED channel file.
+
+    Values are the same recorder-scaled microVolt the ASCII files hold, but
+    the header also carries the start time, sample rate and sample count, so
+    none of those need to be guessed from the file name.
+
+    :param fn: path to a miniSEED EDL file
+    :type fn: str or :class:`pathlib.Path`
+    :return: samples, start time and sample rate
+    :rtype: tuple of (:class:`numpy.ndarray`, datetime, float)
+    """
+    try:
+        from obspy import read as obspy_read
+    except ImportError as error:
+        raise ImportError(
+            "Reading PR6-24 miniSEED needs obspy: pip install mt-io[obspy]"
+        ) from error
+
+    stream = obspy_read(Path(fn).as_posix())
+    stream.merge(method=0)
+    trace = stream[0]
+    start = trace.stats.starttime.datetime.replace(tzinfo=timezone.utc)
+    return (
+        trace.data.astype(float),
+        start,
+        float(trace.stats.sampling_rate),
+    )
+
+
 def count_samples(fn: Union[str, Path]) -> int:
     """
-    Count samples in an EDL ASCII file, one value per line.
+    Count samples in an EDL file, whichever format it is in.
+
+    ASCII holds one value per line. miniSEED carries the count in its record
+    headers, which is read without unpacking the data.
 
     :param fn: path to an EDL data file
     :type fn: str or :class:`pathlib.Path`
     :return: number of samples
     :rtype: int
     """
+    if is_miniseed(fn):
+        from obspy import read as obspy_read
+
+        stream = obspy_read(Path(fn).as_posix(), headonly=True)
+        return int(sum(trace.stats.npts for trace in stream))
+
     total = 0
     with open(fn, "rb") as data_file:
         while True:
@@ -439,6 +505,8 @@ class UoADataReader:
         self.data_path = Path(data_path)
         self.station_prefix = station_prefix or ""
         self.files: List[Path] = []
+        # (start, sample_rate) per file, filled in for miniSEED
+        self.segments: List[tuple] = []
         self.logger = logger
 
     def find_files(self) -> List[Path]:
@@ -497,15 +565,16 @@ class UoADataReader:
             return np.array([])
 
         all_data = []
+        self.segments = []
         for file_path in files:
             try:
-                # Read ASCII file: one float per line
-                # Use numpy for speed, skip invalid lines
-                data = np.loadtxt(file_path, dtype=float, comments=None)
-
-                # Handle both 1D array (single column) and 2D array (if accidentally multi-column)
-                if data.ndim > 1:
-                    data = data.flatten()
+                if is_miniseed(file_path):
+                    data, start, rate = read_edl_miniseed(file_path)
+                    self.segments.append((start, rate))
+                else:
+                    data = np.loadtxt(file_path, dtype=float, comments=None)
+                    if data.ndim > 1:
+                        data = data.flatten()
 
                 all_data.append(data)
                 self.logger.debug(f"Read {len(data)} samples from {file_path.name}")
@@ -544,6 +613,7 @@ class UoAReader:
         - Day-numbered folders (001-366)
         - Flat directories
         - Pre-concatenated files
+        - ASCII or miniSEED, detected per file
         - Works without recorder.ini or GPS files
 
     :param data_path: Path to data directory or file
@@ -686,6 +756,7 @@ class UoAReader:
         channels = ["BX", "BY", "BZ", "EX", "EY"]
         channel_data = {}
         channel_files = {}
+        channel_segments = {}
 
         # Read each channel
         for channel in channels:
@@ -698,6 +769,7 @@ class UoAReader:
 
             channel_data[channel] = data
             channel_files[channel] = reader.files
+            channel_segments[channel] = reader.segments
 
         # Check we have data
         if not channel_data:
@@ -714,6 +786,12 @@ class UoAReader:
             f"Read {min_length} samples across {len(channel_data)} channels"
         )
 
+        header_rates = {rate for segs in channel_segments.values() for _, rate in segs}
+        if self.sample_rate is None and header_rates:
+            if len(header_rates) > 1:
+                self.logger.warning(f"Mixed sample rates in headers: {header_rates}")
+            self.sample_rate = max(header_rates)
+            self.logger.info(f"Sample rate {self.sample_rate} Hz from miniSEED headers")
         if self.sample_rate is None:
             for files in channel_files.values():
                 self.sample_rate = infer_sample_rate(files)
@@ -721,17 +799,19 @@ class UoAReader:
                     break
             if self.sample_rate is None:
                 raise ValueError(
-                    "sample_rate could not be determined from the file names; "
-                    "pass sample_rate explicitly"
+                    "sample_rate could not be determined; pass sample_rate explicitly"
                 )
 
-        # EDL writes no header, so the run is dated from the file names.
-        stamps = [
-            stamp
-            for files in channel_files.values()
-            for stamp in (parse_edl_timestamp(f) for f in files)
-            if stamp is not None
-        ]
+        # miniSEED carries the start time; ASCII does not, so fall back to
+        # the stamp in the file name.
+        stamps = [start for segs in channel_segments.values() for start, _ in segs]
+        if not stamps:
+            stamps = [
+                stamp
+                for files in channel_files.values()
+                for stamp in (parse_edl_timestamp(f) for f in files)
+                if stamp is not None
+            ]
         self.start_time = min(stamps) if stamps else None
         if self.start_time is None:
             self.logger.warning(
@@ -750,7 +830,7 @@ class UoAReader:
                 ((parse_edl_timestamp(f), f) for f in files if parse_edl_timestamp(f)),
                 key=lambda pair: pair[0],
             )
-            if len(stamped) < 2:
+            if len(stamped) < 2 or is_miniseed(stamped[-1][1]):
                 continue
             # the run ends where the last file ends, not at its start stamp
             span = (stamped[-1][0] - stamped[0][0]).total_seconds() + (
