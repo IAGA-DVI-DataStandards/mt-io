@@ -5,9 +5,13 @@ LEMI-423 Reader
 
 Read LEMI-423 broadband magnetotelluric binary files (*.B423).
 
-Stores RAW counts with calibrations as unapplied filters (MTH5 standard).
+Stores raw counts and describes the hardware response as filters. Gains are
+stored forward, physical to recorded, because MTH5 divides by them.
 
-:author: ben kay
+@author: ben kay (ben@auscope.org.au)
+
+:license: MIT
+
 """
 
 # =============================================================================
@@ -64,16 +68,16 @@ class Read_Lemi_Header:
 
     **Lines 13+: Linear Calibration Coefficients**
         Magnetic channels (Bx, By, Bz):
-            - ``%Kmx = 2.909985e-06`` (gain for Bx: counts → nT)
-            - ``%Kmy = 2.909481e-06`` (gain for By: counts → nT)
-            - ``%Kmz = 2.908610e-06`` (gain for Bz: counts → nT)
+            - ``%Kmx = 2.909985e-06`` (gain for Bx: counts -> nT)
+            - ``%Kmy = 2.909481e-06`` (gain for By: counts -> nT)
+            - ``%Kmz = 2.908610e-06`` (gain for Bz: counts -> nT)
             - ``%Ax = -5.002100e+01`` (offset for Bx in nT)
             - ``%Ay = -4.990500e+01`` (offset for By in nT)
             - ``%Az = -4.994700e+01`` (offset for Bz in nT)
 
         Electric channels (Ex, Ey):
-            - ``%Ke1 = 2.910737e-04`` (gain for Ex: counts → V)
-            - ``%Ke2 = 2.909547e-04`` (gain for Ey: counts → V)
+            - ``%Ke1 = 2.910737e-04`` (gain for Ex: counts -> V)
+            - ``%Ke2 = 2.909547e-04`` (gain for Ey: counts -> V)
             - ``%Ae1 = -5.004800e+03`` (offset for Ex in V)
             - ``%Ae2 = -4.958000e+03`` (offset for Ey in V)
 
@@ -86,7 +90,7 @@ class Read_Lemi_Header:
     -------------------
     All channels use linear calibration:
 
-        **physical_value = (raw_counts × K) + A**
+        **physical_value = (raw_counts x K) + A**
 
     Where K is the gain coefficient and A is the offset.
 
@@ -288,33 +292,62 @@ def create_lemi423_linear_calibration_filter(
     component: str, k_coeff: float, a_coeff: float
 ) -> CoefficientFilter:
     """
-    Create linear calibration filter for LEMI-423 channels.
+    Create the linear calibration filter for a LEMI-423 channel.
 
-    Formula: physical_value = (raw_counts × K) + A
+    The header gives physical = counts * K + A. Gains are stored forward,
+    physical to recorded, because MTH5 divides by them, so the gain here is
+    1/K. The A offset cannot be carried: CoefficientFilter has no offset in
+    its schema and complex_response ignores it. A is a DC term, which MT
+    processing removes anyway.
 
-    :param component: Channel component (hx, hy, hz, ex, ey)
-    :param k_coeff: Gain coefficient from header
-    :param a_coeff: Offset coefficient from header
-    :return: Coefficient filter (counts → nT or V)
+    :param component: component name ('hx', 'hy', 'hz', 'ex' or 'ey')
+    :type component: str
+    :param k_coeff: gain coefficient from the header
+    :type k_coeff: float
+    :param a_coeff: offset coefficient from the header, recorded in comments
+    :type a_coeff: float
+    :return: coefficient filter, nanoTesla or microVolt to count
+    :rtype: :class:`mt_metadata.timeseries.filters.CoefficientFilter`
     """
+    if k_coeff == 0:
+        k_coeff = 1.0
+
     coeff_filter = CoefficientFilter()
     coeff_filter.name = f"lemi423_linear_{component}"
-    coeff_filter.units_in = "counts"
-
-    # Set output units based on channel type
-    if component in ["hx", "hy", "hz"]:
-        coeff_filter.units_out = "nanotesla"
-    else:  # ex, ey
-        coeff_filter.units_out = "volts"
-
-    coeff_filter.gain = k_coeff
-    coeff_filter.offset = a_coeff
+    coeff_filter.units_in = "nanoTesla" if component in ("hx", "hy", "hz") else "microVolt"
+    coeff_filter.units_out = "count"
+    coeff_filter.gain = 1.0 / k_coeff
     coeff_filter.comments = (
-        f"LEMI-423 linear calibration: {component.upper()} = "
-        f"(counts × {k_coeff}) + {a_coeff}"
+        f"LEMI-423 {component.upper()}: {component.upper()} = "
+        f"counts x {k_coeff} + {a_coeff}; the offset is not carried"
     )
-
     return coeff_filter
+
+
+def create_lemi423_dipole_filter(
+    component: str, dipole_length: float
+) -> CoefficientFilter:
+    """
+    Create the dipole length filter for a LEMI-423 electric channel.
+
+    1 mV/km is 1 microVolt per metre, so a field of E across a dipole of L
+    metres gives E * L microVolt. Without this the electric channels
+    calibrate to dipole voltage rather than field.
+
+    :param component: component name ('ex' or 'ey')
+    :type component: str
+    :param dipole_length: dipole length in metres
+    :type dipole_length: float
+    :return: coefficient filter, milliVolt per kilometer to microVolt
+    :rtype: :class:`mt_metadata.timeseries.filters.CoefficientFilter`
+    """
+    dipole_filter = CoefficientFilter()
+    dipole_filter.name = f"lemi423_dipole_{component}_{dipole_length:.1f}m"
+    dipole_filter.units_in = "milliVolt per kilometer"
+    dipole_filter.units_out = "microVolt"
+    dipole_filter.gain = dipole_length
+    dipole_filter.comments = f"dipole length {dipole_length} m"
+    return dipole_filter
 
 
 # ---------- MTH5-facing reader ----------
@@ -322,7 +355,7 @@ class LEMI423Reader:
     """
     Read LEMI-423 binary files (*.B423) following MTH5 standard.
 
-    Stores RAW counts with calibrations as unapplied filters.
+    Stores raw counts and describes the hardware response as filters.
 
     :param files: Single file path or list of *.B423 files
     :type files: str, Path, or list
@@ -336,8 +369,8 @@ class LEMI423Reader:
         * **station_id** (str) - Station identifier (optional)
 
     **Filter Chain**:
-        - All channels: linear calibration (counts → nT or V)
-        - Magnetic (optional): LEMI-120 coil response (nT → mV)
+        - All channels: linear calibration (counts -> nT or V)
+        - Magnetic (optional): LEMI-120 coil response (nT -> mV)
     """
 
     def __init__(self, files: List[Union[str, Path]], **kwargs):
@@ -650,7 +683,7 @@ class LEMI423Reader:
             ch_metadata = self._get_channel_metadata(code, ch_num)
 
             # **NEW**: Create calibration filter chain (following MTH5 standard)
-            # All channels get linear calibration filter (counts → physical units)
+            # All channels get linear calibration filter (counts -> physical units)
             # Magnetic channels optionally get LEMI-120 coil response if calibration_fn provided
             filters_list = []
 
@@ -672,11 +705,28 @@ class LEMI423Reader:
                     k_val = coeffs.get(k_key, 1.0)
                     a_val = coeffs.get(a_key, 0.0)
 
-                    # Create linear calibration filter (counts → nT or V)
-                    linear_filter = create_lemi423_linear_calibration_filter(
-                        code, k_val, a_val
+                    # ordered physical to recorded: dipole first on electric.
+                    # with no dipole length the channel stays a voltage rather
+                    # than being scaled by an invented 1 m
+                    if code in ("ex", "ey"):
+                        length = (
+                            self.dipole_length_ex
+                            if code == "ex"
+                            else self.dipole_length_ey
+                        )
+                        if length and length > 0:
+                            filters_list.append(
+                                create_lemi423_dipole_filter(code, length)
+                            )
+                        else:
+                            self.logger.warning(
+                                f"No dipole length for {code}, so it calibrates "
+                                "to electrode voltage, not field"
+                            )
+
+                    filters_list.append(
+                        create_lemi423_linear_calibration_filter(code, k_val, a_val)
                     )
-                    filters_list.append(linear_filter)
 
             # Add LEMI-120 coil response for magnetic channels (if provided)
             if code in ["hx", "hy", "hz"] and self.calibration_fn is not None:
@@ -697,9 +747,10 @@ class LEMI423Reader:
             if filters_list:
                 channel_response = ChannelResponse(filters_list=filters_list)
 
-                # Update metadata to reference all filters
+                # applied=True means the response is present in the data,
+                # which is what tells aurora to divide it back out
                 ch_metadata.filter.name = [f.name for f in filters_list]
-                ch_metadata.filter.applied = [False] * len(filters_list)
+                ch_metadata.filter.applied = [True] * len(filters_list)
 
             # Create ChannelTS object with channel_response
             ch = ChannelTS(
@@ -749,7 +800,7 @@ def read_lemi423(fn: Union[str, Path, List[Union[str, Path]]], **kwargs) -> RunT
     """
     Read LEMI-423 binary files (*.B423) and return RunTS.
 
-    Stores RAW counts with calibrations as unapplied filters (MTH5 standard).
+    Stores raw counts and describes the hardware response as filters.
 
     :param fn: Single file path or list of *.B423 files
     :type fn: str, Path, or list

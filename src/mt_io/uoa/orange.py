@@ -140,7 +140,7 @@ class OrangeDataReader:
         - Binary data stream (21 bytes per sample)
 
         - Returns raw counts (no calibration applied)
-        - Calibrations described as unapplied filters
+        - Hardware response described as filters
 
     :param file_path: Path to .BIN file
     :type file_path: Path or str
@@ -300,7 +300,7 @@ class OrangeReader:
     MTH5-compatible reader for Orange Box binary files.
 
         - Stores raw counts in data arrays (no calibrations applied)
-        - Describes all calibrations as unapplied filters (filter.applied = False)
+        - Describes the hardware response as filters, applied=True
 
     :param files: Single file path or list of .BIN files to read
     :type files: str, Path, or list
@@ -408,10 +408,10 @@ class OrangeReader:
             channel_response = None
             if filters_list:
                 channel_response = ChannelResponse(filters_list=filters_list)
-                for sequence, filter_obj in enumerate(filters_list, start=1):
+                for stage, filter_obj in enumerate(filters_list, start=1):
                     ch_metadata.add_filter(
                         AppliedFilter(
-                            name=filter_obj.name, sequence=sequence, applied=False
+                            name=filter_obj.name, stage=stage, applied=True
                         )
                     )
 

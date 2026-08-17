@@ -128,6 +128,8 @@ class LEMICollection(Collection):
 
         self.station_id = "mt001"
         self.survey_id = "mt"
+        self.dipole_length_ex = 0.0
+        self.dipole_length_ey = 0.0
         self.calibration_dict = {}
 
     def get_calibrations(self, calibration_path: str | Path) -> dict:
@@ -312,6 +314,7 @@ class LEMICollection(Collection):
             entry["file_size"] = file_size
             entry["n_samples"] = n_samples
             entry["instrument_id"] = instrument_id
+            entry["dipole"] = [self.dipole_length_ex, self.dipole_length_ey]
 
             entries.append(entry)
 

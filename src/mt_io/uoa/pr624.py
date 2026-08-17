@@ -659,7 +659,7 @@ class UoAReader:
         - Sample rate is inferred from consecutive file names when not given
         - Samples stay as recorded logger voltage in microVolt
         - The Bz divider and terminal box gain are attached as response
-          filters with applied=False, not applied to the data
+          response filters, which aurora divides back out
         - For accurate E-field, provide actual dipole lengths in meters
     """
 
@@ -723,7 +723,7 @@ class UoAReader:
         Read EDL data files and return a RunTS object.
 
         - Stores RAW microVolt in data array
-        - Describes all calibrations as filters with filter.applied = False
+        - Describes the hardware response as filters, applied=True
 
         Process:
         1. Find and read all 5 MT channels (BX, BY, BZ, EX, EY)
@@ -875,7 +875,7 @@ class UoAReader:
             if self.start_time is not None:
                 ch_metadata.time_period.start = self.start_time.isoformat()
 
-            # Response filters, attached with applied=False
+            # Response filters describing what is in the data
             if ch_type == "magnetic":
                 channel_response = self._create_magnetic_filters(code)
             else:  # electric
@@ -883,12 +883,14 @@ class UoAReader:
 
             # Update metadata to reference filters
             if channel_response is not None:
-                for sequence, filter_obj in enumerate(
+                for stage, filter_obj in enumerate(
                     channel_response.filters_list, start=1
                 ):
+                    # applied=True means the response is present in the data,
+                    # which is what tells aurora to divide it back out
                     ch_metadata.add_filter(
                         AppliedFilter(
-                            name=filter_obj.name, sequence=sequence, applied=False
+                            name=filter_obj.name, stage=stage, applied=True
                         )
                     )
 
@@ -1110,7 +1112,7 @@ def read_uoa(data_path: Union[str, Path], **kwargs) -> RunTS:
     :type data_path: str or :class:`pathlib.Path`
     :param kwargs: passed straight through to :class:`UoAReader`
     :type kwargs: dict
-    :return: run time series with response filters attached, applied=False
+    :return: run time series with the hardware response attached
     :rtype: :class:`mt_timeseries.RunTS`
 
     :Example:
