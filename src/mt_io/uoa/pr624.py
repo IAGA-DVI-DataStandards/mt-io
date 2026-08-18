@@ -74,6 +74,10 @@ EDL_SAMPLE_RATES = (
     200, 250, 300, 375, 500, 600, 750, 1000, 3000,
 )
 
+# Standard field layout: ex north, ey east. Anything else is
+# recorded in the field notes and passed in by the caller.
+NOMINAL_AZIMUTH = {"ex": 0.0, "ey": 90.0}
+
 # Electric field terminal box gain (hardware-fixed)
 E_TERMINAL_BOX_GAIN = 10.0  # x10 pre-amplifier
 
@@ -245,32 +249,50 @@ def create_bartington_calibration_filter(component: str) -> CoefficientFilter:
 
 
 def create_dipole_length_filter(
-    component: str, dipole_length: float
+    component: str, dipole_length: float, azimuth: Optional[float] = None
 ) -> CoefficientFilter:
     """
-    Create the dipole length filter for electric channels.
+    Create the dipole length filter for an electric channel.
 
-    1 mV/km is 1 microVolt per metre, so a field of E across a dipole of
-    length L metres produces E * L microVolt.
+    1 mV/km is 1 microVolt per metre, so a field E across a dipole of length L
+    metres gives E * L microVolt.
+
+    The gain also carries the sign. The electric channels are inverted in
+    hardware, so a dipole laid the standard way, ex north and ey east, records
+    the negative of the field along it. Laying a dipole south or west reverses
+    that again and the two cancel. The azimuth therefore decides the sign, and
+    it has to be supplied because nothing downstream applies it: aurora and
+    mth5 store `measurement_azimuth` but never rotate on it.
 
     :param component: component name ('ex' or 'ey')
     :type component: str
     :param dipole_length: dipole length in metres
     :type dipole_length: float
+    :param azimuth: as-laid azimuth in degrees, default 0 for ex and 90 for ey
+    :type azimuth: float, optional
     :return: coefficient filter, milliVolt per kilometer to microVolt
     :rtype: :class:`mt_metadata.timeseries.filters.CoefficientFilter`
     """
     if dipole_length <= 0:
         dipole_length = 1.0  # Fallback
 
+    nominal = NOMINAL_AZIMUTH[component]
+    if azimuth is None:
+        azimuth = nominal
+    # a dipole within 90 degrees of nominal points the standard way
+    reversed_dipole = abs(((azimuth - nominal) + 180) % 360 - 180) > 90
+    sign = 1.0 if reversed_dipole else -1.0
+
     dipole_filter = CoefficientFilter()
     dipole_filter.name = f"uoa_dipole_{component}_{dipole_length:.1f}m"
     dipole_filter.units_in = "milliVolt per kilometer"
     dipole_filter.units_out = "microVolt"
-    dipole_filter.gain = dipole_length  # forward: 1 mV/km == 1 uV/m, over L m
+    dipole_filter.gain = sign * dipole_length
     dipole_filter.comments = (
-        f"Dipole length normalization: {dipole_length}m. "
-        f"Converts electrode potential to electric field."
+        f"{dipole_length} m dipole laid at {azimuth:.0f} deg, nominal "
+        f"{nominal:.0f}; sign {'+' if sign > 0 else '-'} because the hardware "
+        f"inverts E and the dipole is "
+        f"{'reversed, which cancels it' if reversed_dipole else 'the standard way'}"
     )
     return dipole_filter
 
@@ -373,6 +395,27 @@ def read_edl_miniseed(fn: Union[str, Path]):
     )
 
 
+def parse_edl_station(path: Union[str, Path]) -> Optional[str]:
+    """
+    Pull the station id out of an EDL file name.
+
+    Names are {station}YYMMDDhhmmss.{CHANNEL}, so the stamp is a fixed
+    twelve digits at the end and whatever precedes it is the station.
+    Reading it that way avoids having to know the prefix in advance, which
+    matters because field names are not always tidy: CP1L07 was written
+    CP1L7_ and CP1L09 was written CP1B09_.
+
+    :param path: path to an EDL data file
+    :type path: str or :class:`pathlib.Path`
+    :return: station id, or None if the name carries no stamp
+    :rtype: str or None
+    """
+    match = EDL_TIMESTAMP.search(Path(path).stem)
+    if match is None:
+        return None
+    return Path(path).stem[: match.start()].rstrip("_-") or None
+
+
 def count_samples(fn: Union[str, Path]) -> int:
     """
     Count samples in an EDL file, whichever format it is in.
@@ -471,6 +514,45 @@ def infer_sample_rate(
     return float(rate)
 
 
+def decimate_series(
+    data: np.ndarray, factor: int, max_stage: int = 8
+) -> np.ndarray:
+    """
+    Decimate one channel with anti-alias filtering.
+
+    Long-period EDL is often recorded at 10 Hz when 1 Hz covers the band of
+    interest, and the extra rate only adds storage and bands that sit in the
+    fluxgate noise floor. Large factors are split into stages because a single
+    high order FIR is numerically poor.
+
+    :param data: samples
+    :type data: :class:`numpy.ndarray`
+    :param factor: integer decimation factor
+    :type factor: int
+    :param max_stage: largest factor per stage, defaults to 8
+    :type max_stage: int, optional
+    :return: decimated samples
+    :rtype: :class:`numpy.ndarray`
+    """
+    from scipy.signal import decimate as scipy_decimate
+
+    if factor <= 1:
+        return np.asarray(data, dtype=float)
+
+    stages, remaining = [], int(factor)
+    for candidate in range(min(max_stage, remaining), 1, -1):
+        while remaining % candidate == 0 and remaining > 1:
+            stages.append(candidate)
+            remaining //= candidate
+    if remaining > 1:
+        stages.append(remaining)
+
+    out = np.asarray(data, dtype=float)
+    for stage in stages:
+        out = scipy_decimate(out, stage, ftype="fir", zero_phase=True)
+    return out
+
+
 # ==============================================================================
 # EDL Data File Reader
 # ==============================================================================
@@ -522,12 +604,24 @@ class UoADataReader:
         :rtype: list of Path
         """
         if self.data_path.is_dir():
-            found = list(
-                self.data_path.glob(f"**/{self.station_prefix}*.{self.channel}")
-            )
-            if not found:
-                # files that carry no station prefix
-                found = list(self.data_path.glob(f"**/*.{self.channel}"))
+            found = list(self.data_path.glob(f"**/*.{self.channel}"))
+            if found and self.station_prefix:
+                want = self.station_prefix.rstrip("_-").lower()
+                matched = [
+                    f for f in found
+                    if (parse_edl_station(f) or "").lower() == want
+                ]
+                if matched:
+                    found = matched
+                else:
+                    seen = sorted(
+                        {parse_edl_station(f) or "?" for f in found}
+                    )
+                    self.logger.warning(
+                        f"No {self.channel} files for station "
+                        f"{self.station_prefix.rstrip('_-')}; using all "
+                        f"{len(found)} found instead, from {seen}"
+                    )
             if found:
                 found = sort_by_timestamp(found)
                 self.logger.info(f"Found {len(found)} files for {self.channel}")
@@ -630,6 +724,10 @@ class UoAReader:
         * **station_prefix** (str) - File prefix like 'EDL_', 'MT001_' (default: '')
         * **dipole_length_ex** (float) - Ex dipole length in meters (default: 1.0)
         * **dipole_length_ey** (float) - Ey dipole length in meters (default: 1.0)
+        * **ex_azimuth** (float) - as-laid Ex azimuth in degrees (default: 0)
+        * **ey_azimuth** (float) - as-laid Ey azimuth in degrees (default: 90)
+        * **decimate_to** (float) - decimate to this rate in Hz before the
+          response is attached, e.g. 1.0 for long period (default: None)
         * **calibration_fn_bx** (str) - LEMI-120 .rsp file for Bx (if lemi120 mode)
         * **calibration_fn_by** (str) - LEMI-120 .rsp file for By (if lemi120 mode)
         * **calibration_fn_bz** (str) - LEMI-120 .rsp file for Bz (if lemi120 mode)
@@ -681,6 +779,17 @@ class UoAReader:
         # Dipole lengths for electric field conversion
         self.dipole_length_ex = kwargs.get("dipole_length_ex", 1.0)
         self.dipole_length_ey = kwargs.get("dipole_length_ey", 1.0)
+
+        # as-laid electrode azimuths from the field notes. The standard is ex
+        # north and ey east; south or west reverses the channel and the reader
+        # corrects for it, because nothing downstream does.
+        self.ex_azimuth = kwargs.get("ex_azimuth", NOMINAL_AZIMUTH["ex"])
+        self.ey_azimuth = kwargs.get("ey_azimuth", NOMINAL_AZIMUTH["ey"])
+
+        # optional decimation, applied to the samples before the response is
+        # attached so nothing is lost. RunTS.decimate drops channel_response
+        # while leaving the metadata claiming it is applied.
+        self.decimate_to = kwargs.get("decimate_to", None)
 
         # Calibration files (LEMI-120 mode only)
         self.calibration_fn_bx = kwargs.get("calibration_fn_bx", None)
@@ -800,6 +909,26 @@ class UoAReader:
             if self.sample_rate is None:
                 raise ValueError(
                     "sample_rate could not be determined; pass sample_rate explicitly"
+                )
+
+        if self.decimate_to:
+            ratio = self.sample_rate / float(self.decimate_to)
+            if ratio < 1 or abs(ratio - round(ratio)) > 1e-9:
+                raise ValueError(
+                    f"Cannot decimate {self.sample_rate} Hz to "
+                    f"{self.decimate_to} Hz, the factor is not a whole number"
+                )
+            factor = int(round(ratio))
+            if factor > 1:
+                for channel in list(channel_data):
+                    channel_data[channel] = decimate_series(
+                        channel_data[channel], factor
+                    )
+                self.sample_rate = float(self.decimate_to)
+                self.n_samples = min(len(v) for v in channel_data.values())
+                self.logger.info(
+                    f"Decimated by {factor} to {self.sample_rate} Hz, "
+                    f"{self.n_samples} samples"
                 )
 
         # miniSEED carries the start time; ASCII does not, so fall back to
@@ -992,7 +1121,10 @@ class UoAReader:
             )
             dipole_length = 1.0
 
-        filters.append(create_dipole_length_filter(component, dipole_length))
+        azimuth = self.ex_azimuth if component == "ex" else self.ey_azimuth
+        filters.append(
+            create_dipole_length_filter(component, dipole_length, azimuth)
+        )
         filters.append(create_efield_gain_filter())
 
         return ChannelResponse(filters_list=filters)
@@ -1080,12 +1212,13 @@ class UoAReader:
             ch_metadata.units = "microVolt"
 
             # Store dipole length in metadata for filter application
+            # the dipole filter carries the sign that brings the channel
+            # into the nominal north/east frame, so report that frame here
             if component == "ex":
                 ch_metadata.dipole_length = self.dipole_length_ex
-                ch_metadata.measurement_azimuth = 0.0  # Default N-S
-            else:  # ey
+            else:
                 ch_metadata.dipole_length = self.dipole_length_ey
-                ch_metadata.measurement_azimuth = 90.0  # Default E-W
+            ch_metadata.measurement_azimuth = NOMINAL_AZIMUTH[component]
 
             ch_metadata.measurement_tilt = 0.0
 
