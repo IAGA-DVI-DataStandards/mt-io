@@ -150,16 +150,35 @@ def read_uoa_coil_response(
 
     if is_normalized:
         # Normalized: nT -> nT (relative correction)
-        fap.units_in = "nanotesla"
-        fap.units_out = "nanotesla"
-        fap.comments = f"LEMI-120 normalized response from {calibration_fn.name}"
+        fap.units_in = "nanoTesla"
+        fap.units_out = "nanoTesla"
+        fap.comments = f"normalized coil response from {calibration_fn.name}"
     else:
-        # Absolute: nT -> mV (includes DC sensitivity)
-        fap.units_in = "nanotesla"
-        fap.units_out = "millivolts"
-        fap.comments = f"LEMI-120 absolute response (mV/nT) from {calibration_fn.name}"
+        # absolute, nT to milliVolt, so it already carries the sensitivity
+        fap.units_in = "nanoTesla"
+        fap.units_out = "milliVolt"
+        fap.comments = f"coil response in mV/nT from {calibration_fn.name}"
 
     return fap
+
+
+def create_mv_to_uv_filter() -> CoefficientFilter:
+    """
+    Create the milliVolt to microVolt step.
+
+    A coil response given in mV/nT stops one prefix short of the recorded
+    units, so this carries it the rest of the way.
+
+    :return: coefficient filter, milliVolt to microVolt
+    :rtype: :class:`mt_metadata.timeseries.filters.CoefficientFilter`
+    """
+    f = CoefficientFilter()
+    f.name = "uoa_millivolt_to_microvolt"
+    f.units_in = "milliVolt"
+    f.units_out = "microVolt"
+    f.gain = 1000.0
+    f.comments = "milliVolt to microVolt, to match the recorded units."
+    return f
 
 
 def create_bz_divider_filter() -> CoefficientFilter:
@@ -184,12 +203,16 @@ def create_bz_divider_filter() -> CoefficientFilter:
     return bz_filter
 
 
-def create_efield_gain_filter() -> CoefficientFilter:
+def create_efield_gain_filter(gain: float = E_TERMINAL_BOX_GAIN) -> CoefficientFilter:
     """
     Create the electric field terminal box filter.
 
-    The terminal box holds a fixed x10 pre-amplifier ahead of the logger.
+    The terminal box holds a x10 pre-amplifier ahead of the logger. Not every
+    deployment used one, so the gain is settable and 1.0 means the electrodes
+    fed the logger directly.
 
+    :param gain: forward gain, electrode to logger
+    :type gain: float
     :return: coefficient filter, electrode microVolt to logger microVolt
     :rtype: :class:`mt_metadata.timeseries.filters.CoefficientFilter`
     """
@@ -197,9 +220,9 @@ def create_efield_gain_filter() -> CoefficientFilter:
     efield_filter.name = "uoa_efield_terminal_box_gain"
     efield_filter.units_in = "microVolt"
     efield_filter.units_out = "microVolt"
-    efield_filter.gain = E_TERMINAL_BOX_GAIN  # 10.0 (forward: electrode -> logger)
+    efield_filter.gain = gain  # forward: electrode -> logger
     efield_filter.comments = (
-        "E-field terminal box, fixed x10 pre-amplifier ahead of the logger."
+        f"E-field terminal box, x{gain:g} pre-amplifier ahead of the logger."
     )
     return efield_filter
 
@@ -600,11 +623,16 @@ class UoADataReader:
         to *.{channel} for files that carry no station prefix. Results are
         ordered by the stamp in the file name, not by path.
 
+        Archives packed on a Mac carry an AppleDouble "._name" sidecar beside
+        every file. They share the data extension but hold resource fork bytes,
+        so they are dropped here rather than parsed.
+
         :return: List of file paths sorted chronologically
         :rtype: list of Path
         """
         if self.data_path.is_dir():
-            found = list(self.data_path.glob(f"**/*.{self.channel}"))
+            found = [f for f in self.data_path.glob(f"**/*.{self.channel}")
+                     if not f.name.startswith("._")]
             if found and self.station_prefix:
                 want = self.station_prefix.rstrip("_-").lower()
                 matched = [
@@ -726,6 +754,13 @@ class UoAReader:
         * **dipole_length_ey** (float) - Ey dipole length in meters (default: 1.0)
         * **ex_azimuth** (float) - as-laid Ex azimuth in degrees (default: 0)
         * **ey_azimuth** (float) - as-laid Ey azimuth in degrees (default: 90)
+        * **efield_gain** (float) - E terminal box gain, 1.0 if none was used
+          (default: 10.0)
+        * **declination** (float) - magnetic declination in degrees (default: 0)
+        * **geographic_name** (str) - site name from the deployment notes
+        * **acquired_by** (str) - operator from the deployment notes
+        * **data_logger_id** (str) - recorder serial from the deployment notes
+        * **magnetometer_id** (str) - sensor serial from the deployment notes
         * **decimate_to** (float) - decimate to this rate in Hz before the
           response is attached, e.g. 1.0 for long period (default: None)
         * **calibration_fn_bx** (str) - LEMI-120 .rsp file for Bx (if lemi120 mode)
@@ -790,6 +825,16 @@ class UoAReader:
         # attached so nothing is lost. RunTS.decimate drops channel_response
         # while leaving the metadata claiming it is applied.
         self.decimate_to = kwargs.get("decimate_to", None)
+
+        # identifiers and site description, all optional and all from the
+        # deployment notes rather than anything in the data files
+        # not every deployment ran the x10 terminal box, so allow 1.0
+        self.efield_gain = kwargs.get("efield_gain", E_TERMINAL_BOX_GAIN)
+        self.declination = kwargs.get("declination", 0.0)
+        self.geographic_name = kwargs.get("geographic_name", None)
+        self.acquired_by = kwargs.get("acquired_by", None)
+        self.data_logger_id = kwargs.get("data_logger_id", None)
+        self.magnetometer_id = kwargs.get("magnetometer_id", None)
 
         # Calibration files (LEMI-120 mode only)
         self.calibration_fn_bx = kwargs.get("calibration_fn_bx", None)
@@ -911,6 +956,7 @@ class UoAReader:
                     "sample_rate could not be determined; pass sample_rate explicitly"
                 )
 
+        native_rate = None
         if self.decimate_to:
             ratio = self.sample_rate / float(self.decimate_to)
             if ratio < 1 or abs(ratio - round(ratio)) > 1e-9:
@@ -924,6 +970,7 @@ class UoAReader:
                     channel_data[channel] = decimate_series(
                         channel_data[channel], factor
                     )
+                native_rate = self.sample_rate
                 self.sample_rate = float(self.decimate_to)
                 self.n_samples = min(len(v) for v in channel_data.values())
                 self.logger.info(
@@ -952,6 +999,9 @@ class UoAReader:
         # Files are concatenated end to end, so warn if they do not join up.
         # File length is a recorder setting, so compare total samples against
         # the wall-clock span rather than assuming a fixed file duration.
+        # count_samples reads the file, so it is in the rate the file was
+        # written at, which is not self.sample_rate once decimation has run
+        file_rate = native_rate if native_rate else self.sample_rate
         for channel, files in channel_files.items():
             if channel not in channel_data or len(files) < 2:
                 continue
@@ -963,7 +1013,7 @@ class UoAReader:
                 continue
             # the run ends where the last file ends, not at its start stamp
             span = (stamped[-1][0] - stamped[0][0]).total_seconds() + (
-                count_samples(stamped[-1][1]) / self.sample_rate
+                count_samples(stamped[-1][1]) / file_rate
             )
             recorded = len(channel_data[channel]) / self.sample_rate
             missing = span - recorded
@@ -1087,6 +1137,10 @@ class UoAReader:
                 # sensitivity has to follow it to reach recorded units.
                 if coil_filter.units_in == coil_filter.units_out == "nanoTesla":
                     filters.append(create_lemi120_dc_gain_filter(component))
+                elif coil_filter.units_out == "milliVolt":
+                    # the table already holds the sensitivity, it just stops at
+                    # milliVolt while the logger records microVolt
+                    filters.append(create_mv_to_uv_filter())
             except Exception as e:
                 self.logger.error(f"Error reading calibration file {cal_fn}: {e}")
                 return None
@@ -1125,7 +1179,7 @@ class UoAReader:
         filters.append(
             create_dipole_length_filter(component, dipole_length, azimuth)
         )
-        filters.append(create_efield_gain_filter())
+        filters.append(create_efield_gain_filter(self.efield_gain))
 
         return ChannelResponse(filters_list=filters)
 
@@ -1146,8 +1200,15 @@ class UoAReader:
         s.location.longitude = self.longitude if self.longitude is not None else 0.0
         s.location.elevation = self.elevation if self.elevation is not None else 0.0
 
-        s.location.declination.value = 0.0  # User should update if known
-        s.geographic_name = "Unknown"  # User should update
+        s.location.declination.value = self.declination
+
+        # UoA long-period fluxgates were squared to magnetic north, so the
+        # channels sit in the geomagnetic frame, not the geographic one
+        s.orientation.reference_frame = "geomagnetic"
+        if self.geographic_name:
+            s.geographic_name = self.geographic_name
+        if self.acquired_by:
+            s.acquired_by.name = self.acquired_by
 
         return s
 
@@ -1165,6 +1226,8 @@ class UoAReader:
         # Data logger information
         r.data_logger.model = "PR6-24"
         r.data_logger.manufacturer = "Earth Data"
+        if self.data_logger_id:
+            r.data_logger.id = str(self.data_logger_id)
         r.data_logger.type = "digitizer"
 
         # Data type
@@ -1204,6 +1267,8 @@ class UoAReader:
             ch_metadata.sensor.type = (
                 "fluxgate" if self.sensor_type == "bartington" else "induction coil"
             )
+            if self.magnetometer_id:
+                ch_metadata.sensor.id = str(self.magnetometer_id)
 
         else:  # electric
             ch_metadata = Electric()
