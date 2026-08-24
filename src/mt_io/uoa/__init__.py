@@ -3,8 +3,7 @@
 University of Adelaide MT instruments
 =====================================
 
-Readers for the two loggers UoA and Flinders used for long-period and
-broadband MT.
+Readers for two types of Adelaide University MT instruments.
 
 **Earth Data PR6-24** (:func:`read_uoa`, :class:`UoAReader`)
     Three- or six-channel 24-bit field datalogger, paired with external
@@ -24,9 +23,6 @@ broadband MT.
     rewiring.
 
 :class:`UoACollection` groups PR6-24 files into runs for MTH5.
-
-Filter gains are stored forward, physical to recorded, because MTH5 divides
-by them when removing the response.
 
 @author: ben kay (ben@auscope.org.au)
 

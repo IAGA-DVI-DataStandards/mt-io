@@ -21,15 +21,14 @@ so its rate comes from recorder.ini, the caller, or the gap between
 consecutive file stamps, snapped to a rate the instrument supports.
 miniSEED carries rate, start time and sample count of its own.
 
-Filter gains are stored forward, physical to recorded, as MTH5 divides by
-them when removing the response:
+Filter gains, physical to recorded:
 
     hx, hy   nT    -> uV    142.857         (Bartington Mag-03)
     hz       nT    -> uV    142.857 * 0.4   (15k/10k divider to the logger)
     ex, ey   mV/km -> uV    L * 10          (dipole length, terminal box)
 
 Broadband systems use LEMI-120 coils with a normalized .rsp response, so
-the flat-band 200 mV/nT sensitivity is carried as a separate filter.
+the flat-band 400 mV/nT sensitivity is carried as a separate filter.
 
 @author: ben kay (ben@auscope.org.au)
 
@@ -90,7 +89,7 @@ LEMI120_SENSITIVITY_MV_PER_NT = 400.0  # 400 mV/nT
 LEMI120_UV_PER_NT_SPEC = LEMI120_SENSITIVITY_MV_PER_NT * 1e3  # 400,000 uV/nT
 LEMI120_NT_PER_UV = 1.0 / LEMI120_UV_PER_NT_SPEC  # 2.5e-6 nT/uV
 
-# Sensitivities forward, physical to recorded, as MTH5 divides by the gain
+# Sensitivities, physical to recorded
 BARTINGTON_UV_PER_NT = 1.0 / BARTINGTON_NT_PER_UV  # 142.857 uV/nT
 LEMI120_UV_PER_NT = LEMI120_UV_PER_NT_SPEC  # 400,000 uV/nT
 
@@ -620,8 +619,7 @@ class UoADataReader:
         self, channel: str, data_path, station_prefix: Optional[str] = None
     ):
         self.channel = channel.upper()
-        # a list comes from a collection, which has already grouped the files
-        # into runs, so it is kept as given rather than searched for
+        # a list comes from a collection, already grouped into runs
         if isinstance(data_path, (list, tuple, set)):
             self.given_files = [Path(f) for f in data_path]
             self.data_path = None
@@ -717,7 +715,10 @@ class UoADataReader:
         files = self.find_files()
         self.files = files
         if not files:
-            self.logger.error(f"No data files found for channel {self.channel}")
+            # find_files has already warned. A deployment can legitimately
+            # leave a channel out, four component being the common one, so
+            # only having none of them is an error.
+            self.logger.debug(f"No data files for channel {self.channel}")
             return np.array([])
 
         all_data = []
@@ -826,7 +827,7 @@ class UoAReader:
         - Sample rate is inferred from consecutive file names when not given
         - Samples stay as recorded logger voltage in microVolt
         - The Bz divider and terminal box gain are attached as response
-          response filters, which aurora divides back out
+          filters
         - For accurate E-field, provide actual dipole lengths in meters
     """
 
@@ -852,20 +853,16 @@ class UoAReader:
         self.dipole_length_ex = kwargs.get("dipole_length_ex", 1.0)
         self.dipole_length_ey = kwargs.get("dipole_length_ey", 1.0)
 
-        # as-laid electrode azimuths from the field notes. The standard is ex
-        # north and ey east; south or west reverses the channel and the reader
-        # corrects for it, because nothing downstream does.
+        # as-laid electrode azimuths from the field notes, ex north and ey
+        # east by default; south or west reverses the channel sign
         self.ex_azimuth = kwargs.get("ex_azimuth", NOMINAL_AZIMUTH["ex"])
         self.ey_azimuth = kwargs.get("ey_azimuth", NOMINAL_AZIMUTH["ey"])
 
-        # optional decimation, applied to the samples before the response is
-        # attached so nothing is lost. RunTS.decimate drops channel_response
-        # while leaving the metadata claiming it is applied.
+        # decimate before the response is attached; RunTS.decimate drops
+        # channel_response but leaves the metadata claiming it is applied
         self.decimate_to = kwargs.get("decimate_to", None)
 
-        # identifiers and site description, all optional and all from the
-        # deployment notes rather than anything in the data files
-        # not every deployment ran the x10 terminal box, so allow 1.0
+        # from the deployment notes, nothing in the data files carries these
         self.efield_gain = kwargs.get("efield_gain", E_TERMINAL_BOX_GAIN)
         self.declination = kwargs.get("declination", 0.0)
         self.geographic_name = kwargs.get("geographic_name", None)

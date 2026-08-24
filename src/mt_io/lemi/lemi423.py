@@ -5,8 +5,7 @@ LEMI-423 Reader
 
 Read LEMI-423 broadband magnetotelluric binary files (*.B423).
 
-Stores raw counts and describes the hardware response as filters. Gains are
-stored forward, physical to recorded, because MTH5 divides by them.
+Stores raw counts and describes the hardware response as filters.
 
 @author: ben kay (ben@auscope.org.au)
 
@@ -295,11 +294,8 @@ def create_lemi423_linear_calibration_filter(
     """
     Create the linear calibration filter for a LEMI-423 channel.
 
-    The header gives physical = counts * K + A. Gains are stored forward,
-    physical to recorded, because MTH5 divides by them, so the gain here is
-    1/K. The A offset cannot be carried: CoefficientFilter has no offset in
-    its schema and complex_response ignores it. A is a DC term, which MT
-    processing removes anyway.
+    The header gives physical = counts * K + A, so the gain is 1/K. The A
+    offset is not carried, as CoefficientFilter has no offset in its schema.
 
     :param component: component name ('hx', 'hy', 'hz', 'ex' or 'ey')
     :type component: str
