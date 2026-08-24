@@ -173,7 +173,12 @@ class UoACollection(Collection):
                     self.logger.warning(f"No timestamp in {fn.name}, skipping")
                     continue
 
-                n_samples = count_samples(fn)
+                try:
+                    n_samples = count_samples(fn)
+                except ValueError as error:
+                    self.logger.warning(f"{error}, skipping")
+                    continue
+
                 # EDL prefixes each file with the station id, so a rename part
                 # way through a deployment stays visible here.
                 if "_" in fn.stem:
@@ -221,9 +226,10 @@ class UoACollection(Collection):
         """
         Split into runs wherever the recording is not contiguous.
 
-        EDL writes an hour per file, so consecutive files belong to the same
-        run when the next one starts where the previous ended. A tolerance of
-        two sample periods absorbs rounding in the file name stamp.
+        File length is a recorder setting, so consecutive files belong to the
+        same run when the next one starts where the previous ended rather than
+        at any fixed interval. A tolerance of two sample periods absorbs
+        rounding in the file name stamp.
 
         :param df: summary table
         :type df: :class:`pandas.DataFrame`

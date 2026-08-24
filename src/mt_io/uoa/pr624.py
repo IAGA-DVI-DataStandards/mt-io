@@ -446,10 +446,15 @@ def count_samples(fn: Union[str, Path]) -> int:
     ASCII holds one value per line. miniSEED carries the count in its record
     headers, which is read without unpacking the data.
 
+    An empty file is allowed to report zero. Bytes with no samples in them is
+    not a data file at all and raises, because returning zero there puts a run
+    of no length into a collection and silently breaks contiguity.
+
     :param fn: path to an EDL data file
     :type fn: str or :class:`pathlib.Path`
     :return: number of samples
     :rtype: int
+    :raises ValueError: if the file holds bytes but no samples
     """
     if is_miniseed(fn):
         from obspy import read as obspy_read
@@ -464,6 +469,10 @@ def count_samples(fn: Union[str, Path]) -> int:
             if not chunk:
                 break
             total += chunk.count(b"\n")
+
+    if total == 0 and Path(fn).stat().st_size > 0:
+        raise ValueError(f"{Path(fn).name} holds bytes but no samples")
+
     return total
 
 
@@ -523,7 +532,11 @@ def infer_sample_rate(
         span = (t_next - t_this).total_seconds()
         if span <= 0:
             continue
-        rate = snap_sample_rate(count_samples(fn_this) / span)
+        try:
+            n_samples = count_samples(fn_this)
+        except ValueError:
+            continue
+        rate = snap_sample_rate(n_samples / span)
         if rate is not None:
             counts[rate] += 1
 
