@@ -617,10 +617,17 @@ class UoADataReader:
     """
 
     def __init__(
-        self, channel: str, data_path: Path, station_prefix: Optional[str] = None
+        self, channel: str, data_path, station_prefix: Optional[str] = None
     ):
         self.channel = channel.upper()
-        self.data_path = Path(data_path)
+        # a list comes from a collection, which has already grouped the files
+        # into runs, so it is kept as given rather than searched for
+        if isinstance(data_path, (list, tuple, set)):
+            self.given_files = [Path(f) for f in data_path]
+            self.data_path = None
+        else:
+            self.given_files = None
+            self.data_path = Path(data_path)
         self.station_prefix = station_prefix or ""
         self.files: List[Path] = []
         # (start, sample_rate) per file, filled in for miniSEED
@@ -640,9 +647,23 @@ class UoADataReader:
         every file. They share the data extension but hold resource fork bytes,
         so they are dropped here rather than parsed.
 
+        Given a list of files, only the ones for this channel are taken.
+
         :return: List of file paths sorted chronologically
         :rtype: list of Path
         """
+        if self.given_files is not None:
+            found = [
+                f
+                for f in self.given_files
+                if f.suffix.lstrip(".").upper() == self.channel
+                and not f.name.startswith("._")
+            ]
+            if found:
+                return sort_by_timestamp(found)
+            self.logger.warning(f"No {self.channel} files in the list given")
+            return []
+
         if self.data_path.is_dir():
             found = [f for f in self.data_path.glob(f"**/*.{self.channel}")
                      if not f.name.startswith("._")]
@@ -809,11 +830,14 @@ class UoAReader:
         - For accurate E-field, provide actual dipole lengths in meters
     """
 
-    def __init__(
-        self, data_path: Union[str, Path], sensor_type: str = "bartington", **kwargs
-    ):
+    def __init__(self, data_path, sensor_type: str = "bartington", **kwargs):
         self.logger = logger
-        self.data_path = Path(data_path)
+        # a directory, a single file, or the file list a collection built for
+        # one run
+        if isinstance(data_path, (list, tuple, set)):
+            self.data_path = [Path(f) for f in data_path]
+        else:
+            self.data_path = Path(data_path)
         self.sensor_type = sensor_type.lower()
 
         # Required parameters
@@ -878,6 +902,13 @@ class UoAReader:
         if self.station_id:
             return self.station_id
 
+        # a list holds the files of one run, which sit beside each other
+        if isinstance(self.data_path, list):
+            if not self.data_path:
+                return "unknown"
+            first = self.data_path[0]
+            return parse_edl_station(first) or first.parent.name
+
         # Use parent directory name
         return (
             self.data_path.parent.name
@@ -914,7 +945,12 @@ class UoAReader:
             - hx, hy, hz: .rsp response, plus the flat-band gain if normalized
             - ex, ey: dipole filter then the terminal box, mV/km to uV
         """
-        self.logger.info(f"Reading EDL data from {self.data_path}")
+        source = (
+            f"{len(self.data_path)} files"
+            if isinstance(self.data_path, list)
+            else self.data_path
+        )
+        self.logger.info(f"Reading EDL data from {source}")
         self.logger.info(
             f"Sensor type: {self.sensor_type}, Sample rate: {self.sample_rate} Hz"
         )
