@@ -26,12 +26,13 @@ import numpy as np
 import pandas as pd
 from loguru import logger
 from mt_metadata.common import MTime
-from mt_metadata.timeseries import Electric, Magnetic, Run, Station
+from mt_metadata.timeseries import AppliedFilter, Electric, Magnetic, Run, Station
 from mt_metadata.timeseries.filters import (
     ChannelResponse,
     CoefficientFilter,
     FrequencyResponseTableFilter,
 )
+from mt_timeseries import ChannelTS, RunTS
 
 # File extensions (central dispatcher lower-cases extension)
 B423_EXTS = {"b423"}
@@ -413,16 +414,16 @@ class LEMI423Reader:
     def start(self):
         """Start time of data collection"""
         if self._has_data():
-            return MTime(self.data.index[0])
+            return MTime(time_stamp=self.data.index[0])
         elif self.header:
-            return MTime(self.header.get("deployment_time"))
+            return MTime(time_stamp=self.header.get("deployment_time"))
         return None
 
     @property
     def end(self):
         """End time of data collection"""
         if self._has_data():
-            return MTime(self.data.index[-1])
+            return MTime(time_stamp=self.data.index[-1])
         return None
 
     @property
@@ -501,7 +502,7 @@ class LEMI423Reader:
         r.data_logger.model = "LEMI-423"
         r.data_logger.manufacturer = "LEMI"
         r.data_logger.type = "broadband"
-        r.data_type = "MTBB"  # Magnetotelluric Broadband
+        r.data_type = "BBMT"  # broadband MT
 
         if self.header:
             instrument_num = self.header.get("instrument_number", "")
@@ -749,8 +750,12 @@ class LEMI423Reader:
 
                 # applied=True means the response is present in the data,
                 # which is what tells aurora to divide it back out
-                ch_metadata.filter.name = [f.name for f in filters_list]
-                ch_metadata.filter.applied = [True] * len(filters_list)
+                for stage, filter_obj in enumerate(filters_list, start=1):
+                    ch_metadata.add_filter(
+                        AppliedFilter(
+                            name=filter_obj.name, stage=stage, applied=True
+                        )
+                    )
 
             # Create ChannelTS object with channel_response
             ch = ChannelTS(
@@ -848,7 +853,7 @@ def read_lemi423(fn: Union[str, Path, List[Union[str, Path]]], **kwargs) -> RunT
         ...     print(f"Coil filter: {run_ts.hx.channel_metadata.filter.name[0]}")
 
     .. note::
-        - LEMI-423 is a broadband MT instrument (data_type: "MTBB")
+        - LEMI-423 is a broadband MT instrument (data_type: "BBMT")
         - Files are concatenated by timestamp with duplicates removed
         - Gaps in data are preserved (not interpolated)
         - Linear calibration coefficients from file header are always applied
