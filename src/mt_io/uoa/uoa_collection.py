@@ -21,7 +21,12 @@ from pathlib import Path
 import pandas as pd
 
 from mt_io.collection import Collection
-from mt_io.uoa.pr624 import count_samples, infer_sample_rate, parse_edl_timestamp
+from mt_io.uoa.pr624 import (
+    count_samples,
+    infer_sample_rate,
+    parse_edl_station,
+    parse_edl_timestamp,
+)
 
 # =============================================================================
 
@@ -180,11 +185,9 @@ class UoACollection(Collection):
                     continue
 
                 # EDL prefixes each file with the station id, so a rename part
-                # way through a deployment stays visible here.
-                if "_" in fn.stem:
-                    station = fn.stem.rsplit("_", 1)[0]
-                else:
-                    station = fn.parent.name
+                # way through a deployment stays visible here. The separating
+                # underscore is not always written, so let the reader find it.
+                station = parse_edl_station(fn) or fn.parent.name
 
                 entry = self.get_empty_entry_dict()
                 entry["survey"] = self.survey_id
@@ -220,7 +223,35 @@ class UoACollection(Collection):
             return pd.DataFrame(columns=self._columns)
 
         df = self._set_df_dtypes(pd.DataFrame(entries))
+        self._warn_duplicate_starts(df)
         return self._sort_df(df, run_name_zeros)
+
+
+    def _warn_duplicate_starts(self, df: pd.DataFrame) -> None:
+        """
+        Warn when a channel has two files claiming the same start.
+
+        Archives sometimes keep a corrected copy of a day beside the original,
+        in a folder such as ``Orig134`` or ``All-169``. Both are found here and
+        both would go into the run, so the samples appear twice. Which copy is
+        the right one is not something the file names say.
+
+        :param df: summary table
+        :type df: :class:`pandas.DataFrame`
+        """
+        if not len(df):
+            return
+        counts = df.groupby(["station", "component", "start"]).size()
+        repeated = counts[counts > 1]
+        if not len(repeated):
+            return
+
+        stations = sorted({station for station, _, _ in repeated.index})
+        self.logger.warning(
+            f"{len(repeated)} duplicated start time(s) in {stations}; the same "
+            "samples will appear more than once in a run. Check for a second "
+            "copy of a day beside the original."
+        )
 
     def assign_run_names(self, df: pd.DataFrame, zeros: int = 4) -> pd.DataFrame:
         """
@@ -245,15 +276,45 @@ class UoACollection(Collection):
                 block = df[mask].sort_values("start")
                 tolerance = pd.Timedelta(seconds=2.0 / float(sample_rate))
 
-                run_index = 1
-                previous_end = None
+                boundaries = self._run_boundaries(block, tolerance)
+
+                run_index = 0
                 names = []
+                previous_start = None
                 for _, row in block.iterrows():
-                    if previous_end is not None and row.start - previous_end > tolerance:
-                        run_index += 1
+                    if previous_start is None or row.start in boundaries:
+                        if previous_start is None or row.start != previous_start:
+                            run_index += 1
                     names.append(f"sr{int(sample_rate)}_{run_index:0{zeros}}")
-                    if previous_end is None or row.end > previous_end:
-                        previous_end = row.end
+                    previous_start = row.start
                 df.loc[block.index, "run"] = names
 
         return df
+
+    @staticmethod
+    def _run_boundaries(block: pd.DataFrame, tolerance: pd.Timedelta) -> set:
+        """
+        Start times where the recording is not continuous.
+
+        Each channel is walked on its own, so a file missing from one of them
+        ends the run for all of them rather than being hidden by the others.
+        Files that overlap end the run as well: the samples are duplicated and
+        the time axis cannot run through them.
+
+        :param block: rows for one station at one sample rate
+        :type block: :class:`pandas.DataFrame`
+        :param tolerance: how far apart two files may sit and still join
+        :type tolerance: :class:`pandas.Timedelta`
+        :return: start times that begin a new run
+        :rtype: set
+        """
+        boundaries = set()
+        for _, channel in block.groupby("component"):
+            channel = channel.sort_values("start")
+            previous_end = None
+            for _, row in channel.iterrows():
+                if previous_end is not None:
+                    if abs(row.start - previous_end) > tolerance:
+                        boundaries.add(row.start)
+                previous_end = row.end
+        return boundaries

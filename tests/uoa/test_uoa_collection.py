@@ -162,6 +162,92 @@ class TestCountSamples(unittest.TestCase):
             count_samples(fn)
 
 
+class TestRunBoundaries(unittest.TestCase):
+    """Test what ends a run besides a plain gap"""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.path = Path(self.temp_dir)
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir)
+
+    def _frame(self, sample_rate=SAMPLE_RATE):
+        collection = UoACollection(self.path)
+        collection.sample_rate = sample_rate
+        return collection.to_dataframe(sample_rates=[sample_rate])
+
+    def test_overlapping_files_end_the_run(self):
+        """Test that a file starting before the previous one ended splits"""
+        # 240101000000 runs six seconds, so 240101000003 sits inside it
+        write_edl_files(self.path, "TEST01", ["240101000000", "240101000003"])
+        df = self._frame()
+        self.assertEqual(df.run.nunique(), 2)
+
+    def test_overlap_does_not_inflate_a_run(self):
+        """Test that no run holds more samples than its own span"""
+        write_edl_files(self.path, "TEST01", ["240101000000", "240101000003"])
+        df = self._frame()
+        for _, run_df in df.groupby("run"):
+            for _, ch in run_df.groupby("component"):
+                span = (ch.end.max() - ch.start.min()).total_seconds()
+                self.assertLessEqual(ch.n_samples.sum(), span * SAMPLE_RATE + 1)
+
+    def test_a_gap_in_one_channel_ends_the_run_for_all(self):
+        """Test that a channel missing a file splits every channel"""
+        write_edl_files(
+            self.path, "TEST01",
+            ["240101000000", "240101000006", "240101000012"],
+        )
+        # only ex loses its middle file, so only ex has a gap. The others run
+        # straight through and would hide it.
+        (self.path / "TEST01_240101000006.EX").unlink()
+
+        df = self._frame()
+        self.assertEqual(df.run.nunique(), 2)
+        runs_by_component = df.groupby("component").run.nunique()
+        self.assertEqual(set(runs_by_component), {2})
+
+    def test_contiguous_files_still_make_one_run(self):
+        """Test that the overlap check has not broken the ordinary case"""
+        write_edl_files(self.path, "TEST01", ["240101000000", "240101000006"])
+        self.assertEqual(self._frame().run.nunique(), 1)
+
+
+class TestStationNaming(unittest.TestCase):
+    """Test the station id taken from the file name"""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.path = Path(self.temp_dir)
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir)
+
+    def _stations(self):
+        collection = UoACollection(self.path)
+        collection.sample_rate = SAMPLE_RATE
+        return sorted(collection.to_dataframe(sample_rates=[SAMPLE_RATE]).station.unique())
+
+    def test_with_an_underscore(self):
+        write_edl_files(self.path, "TEST01", ["240101000000", "240101000006"])
+        self.assertEqual(self._stations(), ["TEST01"])
+
+    def test_without_an_underscore(self):
+        """Test the naming some deployments use, station then stamp"""
+        body = "\n".join(str(1000 + i) for i in range(N_SAMPLES)) + "\n"
+        for stamp in ("240101000000", "240101000006"):
+            for channel in CHANNELS:
+                (self.path / f"TEST01{stamp}.{channel}").write_text(body)
+        self.assertEqual(self._stations(), ["TEST01"])
+
+    def test_a_rename_gives_two_stations(self):
+        """Test that a mid-deployment rename is not silently merged"""
+        write_edl_files(self.path, "OLD01", ["240101000000"])
+        write_edl_files(self.path, "NEW01", ["240101000006"])
+        self.assertEqual(self._stations(), ["NEW01", "OLD01"])
+
+
 class TestFractionalSeconds(unittest.TestCase):
     """Test times that do not land on a whole second"""
 
