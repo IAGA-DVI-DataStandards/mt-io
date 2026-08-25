@@ -22,7 +22,6 @@ from struct import unpack, unpack_from
 
 import numpy as np
 from mt_timeseries import ChannelTS
-from numpy.lib.stride_tricks import as_strided
 
 from mt_io.phoenix.readers import TSReaderBase
 
@@ -232,22 +231,13 @@ class NativeReader(TSReaderBase):
 
     def read(self) -> tuple[np.ndarray, np.ndarray]:
         """
-        Read the full data file using memory mapping and stride tricks.
-
-        Note
-        ----
-        This uses numpy.lib.stride_tricks.as_strided which can be unstable
-        if the bytes are not the correct length. See notes by numpy.
-
-        The solution is adapted from:
-        https://stackoverflow.com/questions/12080279/how-do-i-create-a-numpy-dtype-that-includes-24-bit-integers
+        Read the full data file using memory mapping.
 
         Returns
         -------
         tuple[np.ndarray, np.ndarray]
             Scaled time series data and footer data as (data, footer)
         """
-        # should do a memory map otherwise things can go badly with as_strided
         raw_data = np.memmap(self.base_path, ">i1", mode="r")
         raw_data = raw_data[self.header_length :]
 
@@ -272,21 +262,14 @@ class NativeReader(TSReaderBase):
         ts = raw_data[:, 0 : self.npts_per_frame * 3].flatten()
         footer = raw_data[:, self.npts_per_frame * 3 :].flatten()
 
-        # get the number of raw byte frames
-        raw_frames = int(ts.size / 12)
-
-        # stride over bytes making new 4 bytes for a 32bit integer and scale
-        ts_data = (
-            as_strided(
-                ts.view(np.int32),
-                strides=(12, 3),
-                shape=(raw_frames, 4),
-            )
-            .flatten()
-            .byteswap()
-            * self.scale_factor
-        )
-        # somehow the number is off by just a bit ~1E-7 V
+        # pad each 3 byte sample to 4 bytes, the same convention as
+        # read_frames. Striding 4 byte windows over 3 byte samples read the
+        # next sample's high byte into the low byte, and read past the
+        # buffer on the last sample.
+        samples = np.ascontiguousarray(ts).view(np.uint8).reshape(-1, 3)
+        padded = np.zeros((samples.shape[0], 4), np.uint8)
+        padded[:, :3] = samples
+        ts_data = padded.reshape(-1).view(">i4").ravel() * self.scale_factor
 
         # view the footer as an int32
         footer = footer.view(np.int32)
