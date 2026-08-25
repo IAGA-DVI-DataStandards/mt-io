@@ -313,16 +313,19 @@ class NativeReader(TSReaderBase):
             - data: np.ndarray with dtype float32
             - footer: np.ndarray with dtype int32
         """
-        data = np.array([])
-        footer = np.array([])
+        # join once at the end; np.append per file copies the whole array
+        # every time. The empty seeds keep the dtype promotion of the old
+        # per-file appends.
+        data_chunks = [np.array([])]
+        footer_chunks = [np.array([])]
         for fn in self.sequence_list[slice(start, end)]:
             self._open_file(fn)
             if self.stream is not None:
                 self.unpack_header(self.stream)
             ts, foot = self.read()
-            data = np.append(data, ts)
-            footer = np.append(footer, foot)
-        return data, footer
+            data_chunks.append(ts)
+            footer_chunks.append(foot)
+        return np.concatenate(data_chunks), np.concatenate(footer_chunks)
 
     def skip_frames(self, num_frames: int) -> bool:
         """
