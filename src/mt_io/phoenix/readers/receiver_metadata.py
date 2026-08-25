@@ -29,6 +29,38 @@ if TYPE_CHECKING:
 
 # =============================================================================
 
+# recmeta.json is what the receiver was programmed with before the survey.
+# EMpower writes empower_recmeta.json when the data is read off the card, so it
+# carries any correction made afterwards, a mislabelled serial or an as-measured
+# dipole. It is only there if EMpower has seen the data, so recmeta.json stays
+# the fallback.
+RECEIVER_METADATA_NAMES = ("empower_recmeta.json", "recmeta.json")
+
+
+def find_receiver_metadata(directory: str | Path) -> Path | None:
+    """
+    Find the receiver metadata file in a directory, EMpower's for preference.
+
+    Parameters
+    ----------
+    directory : str or Path
+        Folder to look in, usually the recording folder.
+
+    Returns
+    -------
+    Path or None
+        Path to the metadata file, None if neither name is there.
+    """
+    directory = Path(directory)
+    for name in RECEIVER_METADATA_NAMES:
+        fn = directory.joinpath(name)
+        if fn.exists():
+            return fn
+    return None
+
+
+# =============================================================================
+
 
 class PhoenixReceiverMetadata:
     """

@@ -20,6 +20,7 @@ import pandas as pd
 
 from mt_io import Collection
 from mt_io.phoenix import open_phoenix, PhoenixReceiverMetadata
+from mt_io.phoenix.readers.receiver_metadata import find_receiver_metadata
 
 # =============================================================================
 
@@ -106,6 +107,7 @@ class PhoenixCollection(Collection):
         self.metadata_dict = {}
 
         self._receiver_metadata_name = "recmeta.json"
+        # EMpower's copy wins where it is there, see find_receiver_metadata
 
     def _read_receiver_metadata_json(
         self, rec_fn: str | Path
@@ -171,8 +173,7 @@ class PhoenixCollection(Collection):
         """
         station_folders = []
         for folder in self.file_path.rglob("**/"):
-            rec_fn = folder.joinpath("recmeta.json")
-            if rec_fn.exists():
+            if find_receiver_metadata(folder) is not None:
                 station_folders.append(folder)
 
         return station_folders
@@ -268,7 +269,7 @@ class PhoenixCollection(Collection):
 
         entries = []
         for folder in station_folders:
-            rec_fn = folder.joinpath(self._receiver_metadata_name)
+            rec_fn = find_receiver_metadata(folder)
             receiver_metadata = self._read_receiver_metadata_json(rec_fn)
             self.metadata_dict[receiver_metadata.station_metadata.id] = (
                 receiver_metadata

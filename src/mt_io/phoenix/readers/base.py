@@ -24,7 +24,7 @@ from mt_metadata.timeseries.filters import ChannelResponse, CoefficientFilter
 from .calibrations import PhoenixCalibration
 from .config import PhoenixConfig
 from .header import Header
-from .receiver_metadata import PhoenixReceiverMetadata
+from .receiver_metadata import PhoenixReceiverMetadata, find_receiver_metadata
 
 # =============================================================================
 
@@ -259,16 +259,19 @@ class TSReaderBase(Header):
     @property
     def recmeta_file_path(self) -> Path | None:
         """
-        Path to the recmeta.json file.
+        Path to the receiver metadata file.
+
+        EMpower's empower_recmeta.json is taken over recmeta.json where it is
+        present, because it holds any correction made after the survey.
 
         Returns
         -------
         Path or None
-            Path to recmeta file if it exists, None otherwise
+            Path to receiver metadata file if it exists, None otherwise
         """
         if self.base_path is not None:
-            recmeta_fn = self.base_path.parent.parent.joinpath("recmeta.json")
-            if recmeta_fn.exists():
+            recmeta_fn = find_receiver_metadata(self.base_path.parent.parent)
+            if recmeta_fn is not None:
                 return recmeta_fn
             else:
                 self.logger.warning("Could not find recmeta file")
