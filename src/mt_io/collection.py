@@ -240,8 +240,11 @@ class Collection:
 
         """
 
-        df.start = pd.to_datetime(df.start, errors="coerce")
-        df.end = pd.to_datetime(df.end, errors="coerce")
+        # ISO8601 rather than inferred: the format is taken from the first
+        # value otherwise, and a sub-second time in a whole second column
+        # silently becomes NaT
+        df.start = pd.to_datetime(df.start, errors="coerce", format="ISO8601")
+        df.end = pd.to_datetime(df.end, errors="coerce", format="ISO8601")
         df.instrument_id = df.instrument_id.astype(str)
         df.calibration_fn = df.calibration_fn.astype(str)
 

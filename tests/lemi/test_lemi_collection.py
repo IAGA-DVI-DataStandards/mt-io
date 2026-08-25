@@ -427,6 +427,30 @@ class TestLEMICollectionDataFrameOperations:
             processed_df["calibration_fn"]
         ) or pd.api.types.is_object_dtype(processed_df["calibration_fn"])
 
+    def test_set_df_dtypes_keeps_sub_second_times(self, sample_dataframe, tmp_path):
+        """A whole second in the first row does not drop later sub-second times."""
+        temp_dir = tmp_path / "temp_init"
+        temp_dir.mkdir()
+
+        lc = LEMICollection(file_path=temp_dir)
+
+        df = sample_dataframe.iloc[:2].copy()
+        df["start"] = [
+            "2022-02-12T02:09:58+00:00",
+            "2022-02-12T03:39:57.001000+00:00",
+        ]
+        df["end"] = [
+            "2022-02-12T03:39:57+00:00",
+            "2022-02-12T05:09:57.500000+00:00",
+        ]
+
+        processed_df = lc._set_df_dtypes(df)
+
+        assert processed_df["start"].notna().all()
+        assert processed_df["end"].notna().all()
+        assert processed_df["start"].iloc[1].microsecond == 1000
+        assert processed_df["end"].iloc[1].microsecond == 500000
+
 
 class TestLEMICollectionRunOperations:
     """Test run assignment and management."""

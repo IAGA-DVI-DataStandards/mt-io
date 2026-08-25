@@ -162,6 +162,30 @@ class TestCountSamples(unittest.TestCase):
             count_samples(fn)
 
 
+class TestFractionalSeconds(unittest.TestCase):
+    """Test times that do not land on a whole second"""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.path = Path(self.temp_dir)
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir)
+
+    def test_a_short_file_keeps_its_time(self):
+        """Test that a sub-second end does not become NaT"""
+        # 60 samples at 10 Hz is a whole six seconds, 65 is not
+        write_edl_files(self.path, "TEST01", ["240101000000"])
+        write_edl_files(self.path, "TEST01", ["240101000006"], n_samples=65)
+        collection = UoACollection(self.path)
+        collection.sample_rate = SAMPLE_RATE
+        df = collection.to_dataframe(sample_rates=[SAMPLE_RATE])
+
+        self.assertEqual(len(df), 2 * len(CHANNELS))
+        self.assertFalse(df.start.isna().any())
+        self.assertFalse(df.end.isna().any())
+
+
 class TestPartialChannelSets(unittest.TestCase):
     """Test deployments that did not record every channel"""
 
