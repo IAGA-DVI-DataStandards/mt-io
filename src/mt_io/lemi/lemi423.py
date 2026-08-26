@@ -209,29 +209,30 @@ class Read_Lemi_Data:
         Time-indexed DataFrame with columns Bx, By, Bz, Ex, Ey (RAW counts, int32).
     """
 
+    # Binary: 30 bytes/sample, little-endian, after a 1024-byte header
+    binary_format = np.dtype(
+        [
+            ("time", "<u4"),
+            ("tick", "<u2"),
+            ("Bx", "<i4"),
+            ("By", "<i4"),
+            ("Bz", "<i4"),
+            ("Ex", "<i4"),
+            ("Ey", "<i4"),
+            ("sync", "<i1"),
+            ("stage", "<u1"),
+            ("CRC", "<i2"),
+        ]
+    )
+
     def __init__(self, binary_file: Union[str, Path], coefficients: Dict[str, float]):
         self.binary_file = str(binary_file)
         self.coefficients = coefficients
 
     def read_dataframe(self) -> pd.DataFrame:
-        # Binary: 30 bytes/sample, little-endian, 1024-byte header
-        binary_format = np.dtype(
-            [
-                ("time", "<u4"),
-                ("tick", "<u2"),
-                ("Bx", "<i4"),
-                ("By", "<i4"),
-                ("Bz", "<i4"),
-                ("Ex", "<i4"),
-                ("Ey", "<i4"),
-                ("sync", "<i1"),
-                ("stage", "<u1"),
-                ("CRC", "<i2"),
-            ]
-        )
         with open(self.binary_file, "rb") as f:
             f.read(1024)  # skip header
-            arr = np.fromfile(f, dtype=binary_format)
+            arr = np.fromfile(f, dtype=self.binary_format)
         if arr.size == 0:
             return pd.DataFrame(columns=["Bx", "By", "Bz", "Ex", "Ey"]).set_index(
                 pd.DatetimeIndex([], tz="UTC", name="time")
@@ -251,6 +252,38 @@ class Read_Lemi_Data:
 
         # Return RAW counts (no calibration applied)
         return df[["Bx", "By", "Bz", "Ex", "Ey"]].sort_index()
+
+    def read_summary(self) -> dict:
+        """
+        Read sample count, start, end and sample rate without the data.
+
+        The records are a fixed 30 bytes, so the count comes from the file
+        size, and the times from the time and tick columns alone. The full
+        columns are scanned because a bad GPS fix can put an out of order
+        stamp anywhere in the file.
+        """
+        record = self.binary_format
+        size = Path(self.binary_file).stat().st_size
+        n_samples = max(0, (size - 1024) // record.itemsize)
+        if n_samples == 0:
+            return {"n_samples": 0, "start": None, "end": None,
+                    "sample_rate": None}
+
+        arr = np.memmap(self.binary_file, dtype=record, mode="r",
+                        offset=1024, shape=(n_samples,))
+        ticks = np.asarray(arr["tick"], dtype=np.int64)
+        stamps = np.asarray(arr["time"], dtype=np.int64) * 1000 + ticks
+
+        def stamp(ms):
+            return pd.to_datetime(int(ms), unit="ms", utc=True)
+
+        tick_max = int(ticks.max())
+        return {
+            "n_samples": n_samples,
+            "start": stamp(stamps.min()),
+            "end": stamp(stamps.max()),
+            "sample_rate": float(tick_max + 1) if tick_max > 0 else None,
+        }
 
 
 def read_lemi_coil_response(calibration_fn, coil_number=None):
