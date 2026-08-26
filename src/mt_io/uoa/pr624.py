@@ -406,7 +406,8 @@ def read_edl_miniseed(fn: Union[str, Path]):
             "Reading PR6-24 miniSEED needs obspy: pip install mt-io[obspy]"
         ) from error
 
-    stream = obspy_read(Path(fn).as_posix())
+    # the caller has already sniffed the magic, so skip the format cascade
+    stream = obspy_read(Path(fn).as_posix(), format="MSEED")
     stream.merge(method=0)
     trace = stream[0]
     start = trace.stats.starttime.datetime.replace(tzinfo=timezone.utc)

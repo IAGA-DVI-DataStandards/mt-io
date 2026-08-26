@@ -494,8 +494,11 @@ class TestTSReaderBaseMetadataObjects:
 
     def test_get_receiver_metadata_object(self, ts_reader_mock_files):
         """Test receiver metadata object creation."""
+        from mt_io.phoenix.readers import base as base_module
+
         reader = ts_reader_mock_files
         reader.rx_metadata = None  # Reset to test
+        base_module._RECEIVER_METADATA_CACHE.clear()
 
         with patch(
             "mt_io.phoenix.readers.base.PhoenixReceiverMetadata"
