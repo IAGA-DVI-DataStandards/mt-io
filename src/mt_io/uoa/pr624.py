@@ -1,109 +1,44 @@
+# -*- coding: utf-8 -*-
 """
-================================================================================
-Earth Data Logger PR6-24 Reader for MTH5
-================================================================================
+=======
+PR6-24
+=======
 
-Reads ASCII magnetotelluric data from Earth Data PR6-24 data loggers.
+    * reads Earth Data PR6-24 (EDL) ASCII files into a RunTS
+    * builds the University of Adelaide sensor and interface response
 
-The PR6-24 is a 6-channel broadband/long-period MT system that records
-data as ASCII text files with one file per channel. Each file contains
-voltage samples in microVolt (μV), one value per line.
+The PR6-24 is a three- or six-channel 24-bit field datalogger. UoA MT
+systems paired it with external magnetic sensors, electrodes and analogue
+interface electronics. It writes one file per channel, named
+{station}YYMMDDhhmmss.{CHANNEL}, either in day-numbered folders (001-366)
+or flat. File length is set at acquisition time by mseed_filesize in
+recorder.ini, so it varies between deployments.
 
-**File Format**:
-    - ASCII text, one sample per line
-    - Units: microVolt (μV)
-    - No header (raw sample values only)
-    - Typical filename: {STATION}YYMMDDHHMMSS.{CHANNEL}
-    - Example: EDL_041020030000.BX
+The recorder writes either ASCII or miniSEED to the same file names, so
+the format is detected from the first record header rather than the
+extension. Both hold input voltage in microVolt. ASCII carries no header,
+so its rate comes from recorder.ini, the caller, or the gap between
+consecutive file stamps, snapped to a rate the instrument supports.
+miniSEED carries rate, start time and sample count of its own.
 
-**Directory Structures Supported**:
-    1. Day folders (001-366): data/294/EDL_041020030000.BX
-    2. Flat directory: data/EDL_041020030000.BX
-    3. Pre-concatenated: data/EDL_BX.txt (all data in single file)
+Filter gains, physical to recorded:
 
-**Hardware Calibration Details**:
+    hx, hy   nT    -> uV    142.857         (Bartington Mag-03)
+    hz       nT    -> uV    142.857 * 0.4   (15k/10k divider to the logger)
+    ex, ey   mV/km -> uV    L * 10          (dipole length, terminal box)
 
-The PR6-24 digitizer has specific hardware gains and voltage dividers:
+Broadband systems use LEMI-120 coils with a normalized .rsp response, so
+the flat-band 400 mV/nT sensitivity is carried as a separate filter.
 
-1. **ADC Characteristics**:
-   - 24-bit sigma-delta converter
-   - Full-scale range: ±8.388 V
-   - Least count: 8.388V / 2^23 ≈ ~1.0 μV
-   - Files store: raw μV values from ADC
+@author: ben kay (ben@auscope.org.au)
 
-2. **Bz Voltage Divider**:
-   - Hardware: 15kΩ (top) / 10kΩ (bottom) resistor network
-   - Reduces ±10V fluxgate output to ±4V at ADC
-   - Division ratio: 10/(15+10) = 0.4
-   - **Bz files contain the DIVIDED voltage**
-   - **Must multiply by 2.5 to recover true sensor output**
-   - Why: Keeps Bz in same ±70,000 nT range as Bx/By
+:license: MIT
 
-3. **Electric Field Terminal Box**:
-   - Hardware: Fixed ×10 pre-amplifier
-   - Boosts electrode signals before logger
-   - **Files contain the AMPLIFIED voltage**
-   - **Must divide by 10 to get true electrode potential**
-   - Why: Improves SNR over long cable runs
-
-**Sensor Configurations**:
-
-Broadband Mode:
-    - Magnetic: LEMI-120 induction coils
-    - Electric: Non-polarizing electrodes
-    - Frequency response from external .rsp calibration files
-
-Long-Period Mode:
-    - Magnetic: Bartington Mag-03 fluxgates
-      * Bx, By: 0.007 nT/μV (after removing voltage divider for Bz)
-      * Bz: 0.0175 nT/μV = 0.007 nT/μV × 2.5 (includes divider correction)
-    - Electric: Non-polarizing electrodes
-      * Must divide by terminal box gain (×10) then by dipole length
-
-**Conversion Formulas**:
-
-For Long-Period (Bartington Mag-03):
-    Bx [nT] = ASCII_Bx [μV] × 0.007
-    By [nT] = ASCII_By [μV] × 0.007
-    Bz [nT] = ASCII_Bz [μV] × 0.0175  (includes 2.5× divider correction)
-
-    Ex [mV/m] = ASCII_Ex [μV] / (10 × dipole_length_ex [m])
-    Ey [mV/m] = ASCII_Ey [μV] / (10 × dipole_length_ey [m])
-
-For Broadband (LEMI-120):
-    - Apply frequency response calibration from .rsp file
-    - Units: nT → mV (induction coil output)
-    - Terminal box gain (×10) applies to electric only
-
-**Example**:
-    >>> from mth5.io.edl import read_uoa
-    >>>
-    >>> # Long-period with Bartington fluxgates
-    >>> run_ts = read_uoa(
-    ...     '/path/to/site/data',
-    ...     sensor_type='bartington',
-    ...     dipole_length_ex=50.0,
-    ...     dipole_length_ey=50.0,
-    ...     station_id='MT001'
-    ... )
-    >>>
-    >>> # Broadband with LEMI-120 coils
-    >>> run_ts = read_uoa(
-    ...     '/path/to/site/data',
-    ...     sensor_type='lemi120',
-    ...     calibration_fn_bx='l120_01.rsp',
-    ...     calibration_fn_by='l120_02.rsp',
-    ...     calibration_fn_bz='l120_03.rsp',
-    ...     dipole_length_ex=50.0,
-    ...     dipole_length_ey=50.0
-    ... )
-
-
-Author:
-
-Date: 2025-11-12
 """
 
+import re
+from collections import Counter
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Union
 
@@ -121,34 +56,42 @@ from mt_timeseries import ChannelTS, RunTS
 # Hardware Calibration Constants
 # ==============================================================================
 
-# ADC characteristics (PR6-24 with 24-bit sigma-delta)
-ADC_FULL_SCALE_V = 8.388  # ±8.388 V full-scale range
-ADC_BITS = 24  # 24-bit resolution
-ADC_COUNTS = 2**23  # Signed range: ±2^23
-ADC_LSB_UV = (ADC_FULL_SCALE_V / ADC_COUNTS) * 1e6  # ~1.0 μV per count
+# PR6-24 digitiser ranges. ASCII is written already scaled to microVolt
+# (EDM 021 4.2.9), so gain selection changes resolution, not units.
+ADC_BITS = 24
+ADC_LOW_GAIN_FULL_SCALE_V = 8.388  # ~1 uV per bit
+ADC_HIGH_GAIN_FULL_SCALE_V = 0.8388  # ~0.1 uV per bit
 
 # Bz voltage divider (hardware-fixed)
-BZ_DIVIDER_R_TOP = 15000.0  # 15 kΩ resistor to sensor
-BZ_DIVIDER_R_BOTTOM = 10000.0  # 10 kΩ resistor to ground
+BZ_DIVIDER_R_TOP = 15000.0  # 15 kOhm resistor to sensor
+BZ_DIVIDER_R_BOTTOM = 10000.0  # 10 kOhm resistor to ground
 BZ_DIVIDER_RATIO = BZ_DIVIDER_R_BOTTOM / (BZ_DIVIDER_R_TOP + BZ_DIVIDER_R_BOTTOM)  # 0.4
-BZ_DIVIDER_CORRECTION = 1.0 / BZ_DIVIDER_RATIO  # 2.5 (multiply to recover true voltage)
+
+# Rates the PR6-24 can be set to, EDM 021 1.3
+EDL_SAMPLE_RATES = (
+    1, 2, 4, 5, 10, 20, 25, 40, 50, 75, 100, 120, 125, 150,
+    200, 250, 300, 375, 500, 600, 750, 1000, 3000,
+)
+
+# Standard field layout: ex north, ey east. Anything else is
+# recorded in the field notes and passed in by the caller.
+NOMINAL_AZIMUTH = {"ex": 0.0, "ey": 90.0}
 
 # Electric field terminal box gain (hardware-fixed)
-E_TERMINAL_BOX_GAIN = 10.0  # ×10 pre-amplifier
+E_TERMINAL_BOX_GAIN = 10.0  # x10 pre-amplifier
 
-# Bartington Mag-03 fluxgate conversion (long-period)
-# From documentation: ±10V → ±70,000 nT
+# Bartington Mag-03 fluxgate, +/-10 V over +/-70,000 nT
 BARTINGTON_NT_PER_V = 70000.0 / 10.0  # 7000 nT/V
-BARTINGTON_NT_PER_UV = BARTINGTON_NT_PER_V / 1e6  # 0.007 nT/μV
+BARTINGTON_NT_PER_UV = BARTINGTON_NT_PER_V / 1e6  # 0.007 nT/uV
 
-# Derived conversion factors for Bartington (long-period)
-BARTINGTON_BX_NT_PER_UV = BARTINGTON_NT_PER_UV  # 0.007 nT/μV
-BARTINGTON_BY_NT_PER_UV = BARTINGTON_NT_PER_UV  # 0.007 nT/μV
-BARTINGTON_BZ_NT_PER_UV = BARTINGTON_NT_PER_UV * BZ_DIVIDER_CORRECTION  # 0.0175 nT/μV
+# LEMI-120 induction coil, flat-band sensitivity
+LEMI120_SENSITIVITY_MV_PER_NT = 400.0  # 400 mV/nT
+LEMI120_UV_PER_NT_SPEC = LEMI120_SENSITIVITY_MV_PER_NT * 1e3  # 400,000 uV/nT
+LEMI120_NT_PER_UV = 1.0 / LEMI120_UV_PER_NT_SPEC  # 2.5e-6 nT/uV
 
-# LEMI-120 induction coil conversion (broadband)
-LEMI120_SENSITIVITY_MV_PER_NT = 200.0  # 200 mV/nT at flat response
-LEMI120_NT_PER_UV = 0.005  # 0.005 nT/μV = (1000 mV/V) / (200 mV/nT) / (1000 μV/mV)
+# Sensitivities, physical to recorded
+BARTINGTON_UV_PER_NT = 1.0 / BARTINGTON_NT_PER_UV  # 142.857 uV/nT
+LEMI120_UV_PER_NT = LEMI120_UV_PER_NT_SPEC  # 400,000 uV/nT
 
 
 def read_uoa_coil_response(
@@ -158,8 +101,8 @@ def read_uoa_coil_response(
     Read LEMI-120 or other coil calibration from .rsp file.
 
     Auto-detects whether the .rsp file contains normalized or absolute amplitudes:
-    - If flat response ~1.0: normalized (nT → nT), needs DC gain filter
-    - If flat response ~200: absolute mV/nT (nT → mV), no DC gain needed
+    - If flat response ~1.0: normalized (nT -> nT), needs DC gain filter
+    - If flat response ~200: absolute mV/nT (nT -> mV), no DC gain needed
 
     :param calibration_fn: Path to .rsp calibration file
     :type calibration_fn: str or Path
@@ -201,185 +144,449 @@ def read_uoa_coil_response(
     fap.name = (
         f"lemi_120_{coil_number}_response" if coil_number else "lemi_120_response"
     )
-    fap.type = "frequency response table"
+    fap.type = "fap"
     fap.calibration_date = "1970-01-01T00:00:00+00:00"  # Default
 
     if is_normalized:
-        # Normalized: nT → nT (relative correction)
-        fap.units_in = "nanotesla"
-        fap.units_out = "nanotesla"
-        fap.comments = f"LEMI-120 normalized response from {calibration_fn.name}"
+        # Normalized: nT -> nT (relative correction)
+        fap.units_in = "nanoTesla"
+        fap.units_out = "nanoTesla"
+        fap.comments = f"normalized coil response from {calibration_fn.name}"
     else:
-        # Absolute: nT → mV (includes DC sensitivity)
-        fap.units_in = "nanotesla"
-        fap.units_out = "millivolts"
-        fap.comments = f"LEMI-120 absolute response (mV/nT) from {calibration_fn.name}"
+        # absolute, nT to milliVolt, so it already carries the sensitivity
+        fap.units_in = "nanoTesla"
+        fap.units_out = "milliVolt"
+        fap.comments = f"coil response in mV/nT from {calibration_fn.name}"
 
     return fap
 
 
+def create_mv_to_uv_filter() -> CoefficientFilter:
+    """
+    Create the milliVolt to microVolt step.
+
+    A coil response given in mV/nT stops one prefix short of the recorded
+    units, so this carries it the rest of the way.
+
+    :return: coefficient filter, milliVolt to microVolt
+    :rtype: :class:`mt_metadata.timeseries.filters.CoefficientFilter`
+    """
+    f = CoefficientFilter()
+    f.name = "uoa_millivolt_to_microvolt"
+    f.units_in = "milliVolt"
+    f.units_out = "microVolt"
+    f.gain = 1000.0
+    f.comments = "milliVolt to microVolt, to match the recorded units."
+    return f
+
+
 def create_bz_divider_filter() -> CoefficientFilter:
     """
-    Create filter for Bz voltage divider correction (Bartington mode only).
+    Create the Bz voltage divider filter.
 
-    **Hardware**: 15kΩ/10kΩ voltage divider reduces Bz sensor output.
-    **Files contain**: Divided voltage (×0.4)
-    **Filter applies**: Multiply by 2.5 to recover true sensor voltage
+    The UoA long-period systems put a 15k/10k divider between the Bz fluxgate
+    and the logger, so the recorded voltage is 0.4 of the sensor output.
 
-    :return: Coefficient filter for Bz divider correction
-    :rtype: CoefficientFilter
-
-    **Why this filter**:
-    The Bartington Mag-03 Bz fluxgate outputs ±10V for ±70,000 nT.
-    A hardware voltage divider (15kΩ top / 10kΩ bottom) reduces this to
-    ±4V at the ADC input. The ASCII files contain the divided voltage.
-    To get the actual sensor output, multiply by 2.5.
-
-    .. note:: Only applies to Bartington mode. LEMI-120 coils have no divider.
+    :return: coefficient filter, sensor microVolt to logger microVolt
+    :rtype: :class:`mt_metadata.timeseries.filters.CoefficientFilter`
     """
     bz_filter = CoefficientFilter()
     bz_filter.name = "uoa_bz_voltage_divider"
     bz_filter.units_in = "microVolt"
     bz_filter.units_out = "microVolt"
-    bz_filter.gain = BZ_DIVIDER_CORRECTION  # 2.5
+    bz_filter.gain = BZ_DIVIDER_RATIO  # 0.4 (forward: sensor -> logger)
     bz_filter.comments = (
-        "Bz voltage divider correction: 15kΩ/10kΩ = 0.4 ratio. "
-        "Multiply by 2.5 to recover true sensor voltage. "
-        "Only applies to Bartington Mag-03 fluxgate (long-period mode)."
+        "Bz voltage divider, 15 kOhm/10 kOhm. The logger sees 0.4 of the "
+        "sensor output. Bartington fluxgate only."
     )
     return bz_filter
 
 
-def create_efield_gain_filter() -> CoefficientFilter:
+def create_efield_gain_filter(gain: float = E_TERMINAL_BOX_GAIN) -> CoefficientFilter:
     """
-    Create filter for E-field terminal box gain removal.
+    Create the electric field terminal box filter.
 
-    **Hardware**: Fixed ×10 pre-amplifier in electric field terminal box
-    **Files contain**: Amplified voltage (×10)
-    **Filter applies**: Divide by 10 to recover true electrode potential
+    The terminal box holds a x10 pre-amplifier ahead of the logger. Not every
+    deployment used one, so the gain is settable and 1.0 means the electrodes
+    fed the logger directly.
 
-    :return: Coefficient filter for E-field gain removal
-    :rtype: CoefficientFilter
-
-    **Why this filter**:
-    The E-field terminal box contains a fixed ×10 pre-amplifier to boost
-    the electrode signals before transmission over long cables. This improves
-    SNR. The ASCII files contain the amplified voltage. To get the actual
-    electrode potential, divide by 10.
+    :param gain: forward gain, electrode to logger
+    :type gain: float
+    :return: coefficient filter, electrode microVolt to logger microVolt
+    :rtype: :class:`mt_metadata.timeseries.filters.CoefficientFilter`
     """
     efield_filter = CoefficientFilter()
     efield_filter.name = "uoa_efield_terminal_box_gain"
     efield_filter.units_in = "microVolt"
     efield_filter.units_out = "microVolt"
-    efield_filter.gain = 1.0 / E_TERMINAL_BOX_GAIN  # 0.1
+    efield_filter.gain = gain  # forward: electrode -> logger
     efield_filter.comments = (
-        "E-field terminal box gain removal: ×10 hardware pre-amplifier. "
-        "Divide by 10 to recover true electrode potential."
+        f"E-field terminal box, x{gain:g} pre-amplifier ahead of the logger."
     )
     return efield_filter
 
 
 def create_lemi120_dc_gain_filter(component: str) -> CoefficientFilter:
     """
-    Create LEMI-120 DC gain filter: microVolt → nanotesla.
+    Create the LEMI-120 flat-band sensitivity filter.
 
-    Applies DC sensitivity of 200 mV/nT = 0.005 nT/μV.
-    Only used when .rsp file contains normalized response (nT → nT).
+    Only needed when the .rsp file holds a normalized response (nT to nT).
 
-    :param component: Component name ('hx', 'hy', or 'hz')
+    :param component: component name ('hx', 'hy' or 'hz')
     :type component: str
-    :return: Coefficient filter for DC gain
-    :rtype: CoefficientFilter
+    :return: coefficient filter, nanoTesla to microVolt
+    :rtype: :class:`mt_metadata.timeseries.filters.CoefficientFilter`
     """
     dc_filter = CoefficientFilter()
     dc_filter.name = f"lemi120_dc_gain_{component}"
-    dc_filter.units_in = "microVolt"
-    dc_filter.units_out = "nanoTesla"
-    dc_filter.gain = LEMI120_NT_PER_UV  # 0.005 nT/μV
-    dc_filter.comments = "LEMI-120 DC sensitivity: 200 mV/nT = 0.005 nT/μV"
+    dc_filter.units_in = "nanoTesla"
+    dc_filter.units_out = "microVolt"
+    dc_filter.gain = LEMI120_UV_PER_NT  # 200,000 uV/nT (forward)
+    dc_filter.comments = "LEMI-120 flat-band sensitivity: 200 mV/nT"
     return dc_filter
 
 
 def create_bartington_calibration_filter(component: str) -> CoefficientFilter:
     """
-    Create Bartington Mag-03 fluxgate calibration filter.
+    Create the Bartington Mag-03 fluxgate filter.
 
-    Converts microVolt to nanotesla using manufacturer specifications.
+    The sensor puts out +/-10 V over +/-70,000 nT, so 142.857 microVolt per nT.
+    For Bz this describes the sensor output, ahead of the divider filter.
 
-    :param component: Component name ('hx', 'hy', or 'hz')
+    :param component: component name ('hx', 'hy' or 'hz')
     :type component: str
-    :return: Coefficient filter for Bartington calibration
-    :rtype: CoefficientFilter
-
-    **Bartington Mag-03 Specifications**:
-    - Range: ±70,000 nT
-    - Output: ±10 V
-    - Conversion: 7000 nT/V = 0.007 nT/μV
-
-    **Important**: For Bz, this filter should be applied AFTER the voltage
-    divider correction filter, as it expects the true sensor voltage.
-
-    .. note:: This is a linear conversion, frequency-independent.
+    :return: coefficient filter, nanoTesla to microVolt
+    :rtype: :class:`mt_metadata.timeseries.filters.CoefficientFilter`
     """
-    if component == "hz":
-        # For Bz: expects voltage AFTER divider correction
-        gain = BARTINGTON_NT_PER_UV  # 0.007 nT/μV
-        comments = (
-            "Bartington Mag-03 Bz calibration: 0.007 nT/μV. "
-            "Applied after voltage divider correction. "
-            "±10V → ±70,000 nT (7000 nT/V)."
-        )
-    else:
-        # For Bx, By: direct conversion
-        gain = BARTINGTON_NT_PER_UV  # 0.007 nT/μV
-        comments = (
-            f"Bartington Mag-03 {component.upper()} calibration: 0.007 nT/μV. "
-            "±10V → ±70,000 nT (7000 nT/V)."
-        )
-
     bart_filter = CoefficientFilter()
     bart_filter.name = f"uoa_bartington_{component}"
-    bart_filter.units_in = "microVolt"
-    bart_filter.units_out = "nanoTesla"
-    bart_filter.gain = gain
-    bart_filter.comments = comments
+    bart_filter.units_in = "nanoTesla"
+    bart_filter.units_out = "microVolt"
+    bart_filter.gain = BARTINGTON_UV_PER_NT
+    bart_filter.comments = (
+        f"Bartington Mag-03 {component.upper()}, +/-10 V over +/-70,000 nT, "
+        "so 142.857 uV/nT."
+    )
     return bart_filter
 
 
 def create_dipole_length_filter(
-    component: str, dipole_length: float
+    component: str, dipole_length: float, azimuth: Optional[float] = None
 ) -> CoefficientFilter:
     """
-    Create dipole length normalization filter for electric fields.
+    Create the dipole length filter for an electric channel.
 
-    Converts microVolt to electric field (mV/km) using dipole length.
+    1 mV/km is 1 microVolt per metre, so a field E across a dipole of length L
+    metres gives E * L microVolt.
 
-    :param component: Component name ('ex' or 'ey')
+    The gain also carries the sign. The electric channels are inverted in
+    hardware, so a dipole laid the standard way, ex north and ey east, records
+    the negative of the field along it. Laying a dipole south or west reverses
+    that again and the two cancel. The azimuth therefore decides the sign, and
+    it has to be supplied because nothing downstream applies it: aurora and
+    mth5 store `measurement_azimuth` but never rotate on it.
+
+    :param component: component name ('ex' or 'ey')
     :type component: str
-    :param dipole_length: Dipole length in meters
+    :param dipole_length: dipole length in metres
     :type dipole_length: float
-    :return: Coefficient filter for dipole normalization
-    :rtype: CoefficientFilter
-
-    **Conversion**:
-    E [mV/km] = V [μV] / (dipole_length [m] / 1000)
-              = V [μV] × (1000 / dipole_length)
-
-    .. note:: This filter should be applied AFTER the terminal box gain filter.
+    :param azimuth: as-laid azimuth in degrees, default 0 for ex and 90 for ey
+    :type azimuth: float, optional
+    :return: coefficient filter, milliVolt per kilometer to microVolt
+    :rtype: :class:`mt_metadata.timeseries.filters.CoefficientFilter`
     """
     if dipole_length <= 0:
         dipole_length = 1.0  # Fallback
 
+    nominal = NOMINAL_AZIMUTH[component]
+    if azimuth is None:
+        azimuth = nominal
+    # a dipole within 90 degrees of nominal points the standard way
+    reversed_dipole = abs(((azimuth - nominal) + 180) % 360 - 180) > 90
+    sign = 1.0 if reversed_dipole else -1.0
+
     dipole_filter = CoefficientFilter()
     dipole_filter.name = f"uoa_dipole_{component}_{dipole_length:.1f}m"
-    dipole_filter.units_in = "microVolt"
-    dipole_filter.units_out = "milliVolt per kilometer"
-    dipole_filter.gain = 1000.0 / dipole_length  # Converts μV to mV/km
+    dipole_filter.units_in = "milliVolt per kilometer"
+    dipole_filter.units_out = "microVolt"
+    dipole_filter.gain = sign * dipole_length
     dipole_filter.comments = (
-        f"Dipole length normalization: {dipole_length}m. "
-        f"Converts electrode potential to electric field."
+        f"{dipole_length} m dipole laid at {azimuth:.0f} deg, nominal "
+        f"{nominal:.0f}; sign {'+' if sign > 0 else '-'} because the hardware "
+        f"inverts E and the dipole is "
+        f"{'reversed, which cancels it' if reversed_dipole else 'the standard way'}"
     )
     return dipole_filter
+
+
+# Every EDL file carries a YYMMDDhhmmss stamp, e.g. FR17_131017000000.BX
+EDL_TIMESTAMP = re.compile(r"(\d{12})$")
+
+
+def parse_edl_timestamp(path: Union[str, Path]) -> Optional[datetime]:
+    """
+    Pull the acquisition start time out of an EDL file name.
+
+    :param path: Path to an EDL data file
+    :type path: str or Path
+    :return: UTC start time, or None if the name carries no stamp
+    :rtype: datetime or None
+    """
+    match = EDL_TIMESTAMP.search(Path(path).stem)
+    if match is None:
+        return None
+    try:
+        stamp = datetime.strptime(match.group(1), "%y%m%d%H%M%S")
+    except ValueError:
+        return None
+    return stamp.replace(tzinfo=timezone.utc)
+
+
+def sort_by_timestamp(files: List[Union[str, Path]]) -> List[Path]:
+    """
+    Order EDL files by the stamp in their name.
+
+    Day folders restart at 001 each January, so a deployment that runs over
+    new year sorts wrongly by path: 001 comes before 365 and the new year
+    lands ahead of December. The stamp carries the year, so sort on that.
+    Files with no stamp keep their path order at the end.
+
+    :param files: EDL data files
+    :type files: list of str or :class:`pathlib.Path`
+    :return: files in chronological order
+    :rtype: list of :class:`pathlib.Path`
+    """
+    stamped, unstamped = [], []
+    for fn in files:
+        stamp = parse_edl_timestamp(fn)
+        (stamped if stamp else unstamped).append((stamp, Path(fn)))
+    stamped.sort(key=lambda pair: pair[0])
+    unstamped.sort(key=lambda pair: pair[1])
+    return [fn for _, fn in stamped] + [fn for _, fn in unstamped]
+
+
+# A miniSEED record opens with a six digit sequence number and a quality code
+MSEED_QUALITY = (b"D", b"R", b"Q", b"M")
+
+
+def is_miniseed(fn: Union[str, Path]) -> bool:
+    """
+    Tell miniSEED apart from ASCII by looking at the first record header.
+
+    The PR6-24 writes either format to the same .BX/.BY/.BZ/.EX/.EY names,
+    so the extension cannot be used to decide.
+
+    :param fn: path to an EDL data file
+    :type fn: str or :class:`pathlib.Path`
+    :return: True if the file starts with a miniSEED record header
+    :rtype: bool
+    """
+    with open(fn, "rb") as data_file:
+        head = data_file.read(8)
+    return len(head) >= 8 and head[:6].isdigit() and head[6:7] in MSEED_QUALITY
+
+
+def read_edl_miniseed(fn: Union[str, Path]):
+    """
+    Read one miniSEED channel file.
+
+    Values are the same recorder-scaled microVolt the ASCII files hold, but
+    the header also carries the start time, sample rate and sample count, so
+    none of those need to be guessed from the file name.
+
+    :param fn: path to a miniSEED EDL file
+    :type fn: str or :class:`pathlib.Path`
+    :return: samples, start time and sample rate
+    :rtype: tuple of (:class:`numpy.ndarray`, datetime, float)
+    """
+    try:
+        from obspy import read as obspy_read
+    except ImportError as error:
+        raise ImportError(
+            "Reading PR6-24 miniSEED needs obspy: pip install mt-io[obspy]"
+        ) from error
+
+    # the caller has already sniffed the magic, so skip the format cascade
+    stream = obspy_read(Path(fn).as_posix(), format="MSEED")
+    stream.merge(method=0)
+    trace = stream[0]
+    start = trace.stats.starttime.datetime.replace(tzinfo=timezone.utc)
+    return (
+        trace.data.astype(float),
+        start,
+        float(trace.stats.sampling_rate),
+    )
+
+
+def parse_edl_station(path: Union[str, Path]) -> Optional[str]:
+    """
+    Pull the station id out of an EDL file name.
+
+    Names are {station}YYMMDDhhmmss.{CHANNEL}, so the stamp is a fixed
+    twelve digits at the end and whatever precedes it is the station.
+    Reading it that way avoids having to know the prefix in advance, which
+    matters because field names are not always tidy: CP1L07 was written
+    CP1L7_ and CP1L09 was written CP1B09_.
+
+    :param path: path to an EDL data file
+    :type path: str or :class:`pathlib.Path`
+    :return: station id, or None if the name carries no stamp
+    :rtype: str or None
+    """
+    match = EDL_TIMESTAMP.search(Path(path).stem)
+    if match is None:
+        return None
+    return Path(path).stem[: match.start()].rstrip("_-") or None
+
+
+def count_samples(fn: Union[str, Path]) -> int:
+    """
+    Count samples in an EDL file, whichever format it is in.
+
+    ASCII holds one value per line. miniSEED carries the count in its record
+    headers, which is read without unpacking the data.
+
+    An empty file is allowed to report zero. Bytes with no samples in them is
+    not a data file at all and raises, because returning zero there puts a run
+    of no length into a collection and silently breaks contiguity.
+
+    :param fn: path to an EDL data file
+    :type fn: str or :class:`pathlib.Path`
+    :return: number of samples
+    :rtype: int
+    :raises ValueError: if the file holds bytes but no samples
+    """
+    if is_miniseed(fn):
+        from obspy import read as obspy_read
+
+        stream = obspy_read(Path(fn).as_posix(), headonly=True)
+        return int(sum(trace.stats.npts for trace in stream))
+
+    total = 0
+    with open(fn, "rb") as data_file:
+        while True:
+            chunk = data_file.read(1 << 20)
+            if not chunk:
+                break
+            total += chunk.count(b"\n")
+
+    if total == 0 and Path(fn).stat().st_size > 0:
+        raise ValueError(f"{Path(fn).name} holds bytes but no samples")
+
+    return total
+
+
+def snap_sample_rate(rate: float, tolerance: float = 0.02) -> Optional[float]:
+    """
+    Snap an estimated rate to one the PR6-24 can actually be set to.
+
+    :param rate: estimated sample rate in Hz
+    :type rate: float
+    :param tolerance: allowed fractional error, defaults to 0.02
+    :type tolerance: float, optional
+    :return: the matching rate from EDL_SAMPLE_RATES, or None
+    :rtype: float or None
+    """
+    if rate <= 0:
+        return None
+    nearest = min(EDL_SAMPLE_RATES, key=lambda valid: abs(valid - rate))
+    if abs(nearest - rate) / nearest <= tolerance:
+        return float(nearest)
+    return None
+
+
+def infer_sample_rate(
+    files: List[Union[str, Path]], max_pairs: int = 25
+) -> Optional[float]:
+    """
+    Work out the sample rate from consecutive file names.
+
+    Each file is stamped with its start time, so a file that runs on into the
+    next one holds ``start(next) - start(this)`` seconds of data and the rate
+    follows from its sample count. Startup files can overlap or leave gaps, so
+    the most common answer is taken rather than the average.
+
+    :param files: EDL data files for one channel
+    :type files: list of str or :class:`pathlib.Path`
+    :param max_pairs: how many consecutive pairs to sample, defaults to 25
+    :type max_pairs: int, optional
+    :return: sample rate in Hz, or None if the files do not agree
+    :rtype: float or None
+    """
+    stamped = sorted(
+        ((parse_edl_timestamp(f), Path(f)) for f in files if parse_edl_timestamp(f)),
+        key=lambda pair: pair[0],
+    )
+    if len(stamped) < 2:
+        return None
+
+    # sample across the whole deployment, not just the start, because setup
+    # fragments at the beginning can overlap and skew the vote
+    pairs = list(zip(stamped, stamped[1:]))
+    if len(pairs) > max_pairs:
+        step = len(pairs) / max_pairs
+        pairs = [pairs[int(i * step)] for i in range(max_pairs)]
+
+    counts = Counter()
+    for (t_this, fn_this), (t_next, _) in pairs:
+        span = (t_next - t_this).total_seconds()
+        if span <= 0:
+            continue
+        try:
+            n_samples = count_samples(fn_this)
+        except ValueError:
+            continue
+        rate = snap_sample_rate(n_samples / span)
+        if rate is not None:
+            counts[rate] += 1
+
+    if not counts:
+        return None
+    rate, votes = counts.most_common(1)[0]
+    if votes < 2:
+        logger.warning(f"Sample rate not consistent across files: {dict(counts)}")
+        return None
+    logger.info(f"Inferred sample rate {rate} Hz from {votes} file pairs")
+    return float(rate)
+
+
+def decimate_series(
+    data: np.ndarray, factor: int, max_stage: int = 8
+) -> np.ndarray:
+    """
+    Decimate one channel with anti-alias filtering.
+
+    Long-period EDL is often recorded at 10 Hz when 1 Hz covers the band of
+    interest, and the extra rate only adds storage and bands that sit in the
+    fluxgate noise floor. Large factors are split into stages because a single
+    high order FIR is numerically poor.
+
+    :param data: samples
+    :type data: :class:`numpy.ndarray`
+    :param factor: integer decimation factor
+    :type factor: int
+    :param max_stage: largest factor per stage, defaults to 8
+    :type max_stage: int, optional
+    :return: decimated samples
+    :rtype: :class:`numpy.ndarray`
+    """
+    from scipy.signal import decimate as scipy_decimate
+
+    if factor <= 1:
+        return np.asarray(data, dtype=float)
+
+    stages, remaining = [], int(factor)
+    for candidate in range(min(max_stage, remaining), 1, -1):
+        while remaining % candidate == 0 and remaining > 1:
+            stages.append(candidate)
+            remaining //= candidate
+    if remaining > 1:
+        stages.append(remaining)
+
+    out = np.asarray(data, dtype=float)
+    for stage in stages:
+        out = scipy_decimate(out, stage, ftype="fir", zero_phase=True)
+    return out
 
 
 # ==============================================================================
@@ -396,10 +603,6 @@ class UoADataReader:
     - Flat directory structure
     - Pre-concatenated single files
 
-    **Why**: EDL data can be organized differently depending on whether it's
-    fresh from the logger, copied for transport, or pre-processed. This class
-    abstracts those differences.
-
     :param channel: Channel name (BX, BY, BZ, EX, EY, TP, etc.)
     :type channel: str
     :param data_path: Path to data directory or specific file
@@ -414,59 +617,76 @@ class UoADataReader:
     """
 
     def __init__(
-        self, channel: str, data_path: Path, station_prefix: Optional[str] = None
+        self, channel: str, data_path, station_prefix: Optional[str] = None
     ):
         self.channel = channel.upper()
-        self.data_path = Path(data_path)
+        # a list comes from a collection, already grouped into runs
+        if isinstance(data_path, (list, tuple, set)):
+            self.given_files = [Path(f) for f in data_path]
+            self.data_path = None
+        else:
+            self.given_files = None
+            self.data_path = Path(data_path)
         self.station_prefix = station_prefix or ""
+        self.files: List[Path] = []
+        # (start, sample_rate) per file, filled in for miniSEED
+        self.segments: List[tuple] = []
         self.logger = logger
 
     def find_files(self) -> List[Path]:
         """
         Find all data files for this channel.
 
-        Search patterns (in order):
-        1. {station_prefix}YYMMDDHHMMSS.{channel} in day folders
-        2. {station_prefix}*.{channel} in data_path
-        3. *.{channel} (any file ending in .BX, .BY, etc.)
+        Searches for {station_prefix}*.{channel} anywhere below data_path,
+        which covers day folders and flat directories alike, then falls back
+        to *.{channel} for files that carry no station prefix. Results are
+        ordered by the stamp in the file name, not by path.
+
+        Archives packed on a Mac carry an AppleDouble "._name" sidecar beside
+        every file. They share the data extension but hold resource fork bytes,
+        so they are dropped here rather than parsed.
+
+        Given a list of files, only the ones for this channel are taken.
 
         :return: List of file paths sorted chronologically
         :rtype: list of Path
-
-        **Why these patterns**:
-        - Pattern 1: Fresh from logger with day folders (standard EDL format)
-        - Pattern 2: Copied to flat directory with station prefix
-        - Pattern 3: Pre-concatenated or renamed files without station prefix
         """
-        # Pattern 1: Look in day-numbered subdirectories (001-366)
+        if self.given_files is not None:
+            found = [
+                f
+                for f in self.given_files
+                if f.suffix.lstrip(".").upper() == self.channel
+                and not f.name.startswith("._")
+            ]
+            if found:
+                return sort_by_timestamp(found)
+            self.logger.warning(f"No {self.channel} files in the list given")
+            return []
+
         if self.data_path.is_dir():
-            # Try day folders first
-            day_pattern = f"**/{self.station_prefix}*.{self.channel}"
-            day_files = sorted(self.data_path.glob(day_pattern))
-            if day_files:
-                self.logger.info(
-                    f"Found {len(day_files)} files for {self.channel} in day folders"
-                )
-                return day_files
-
-            # Pattern 2: Flat directory with timestamped files
-            flat_pattern = f"{self.station_prefix}*.{self.channel}"
-            flat_files = sorted(self.data_path.glob(flat_pattern))
-            if flat_files:
-                self.logger.info(
-                    f"Found {len(flat_files)} files for {self.channel} in flat directory"
-                )
-                return flat_files
-
-            # Pattern 3: Pre-concatenated files (no station prefix)
-            # Simply match any file ending in .{channel} (e.g., *.BX, *.BY)
-            no_prefix_pattern = f"*.{self.channel}"
-            no_prefix_files = sorted(self.data_path.glob(no_prefix_pattern))
-            if no_prefix_files:
-                self.logger.info(
-                    f"Found {len(no_prefix_files)} file(s) for {self.channel} without station prefix"
-                )
-                return no_prefix_files
+            found = [f for f in self.data_path.glob(f"**/*.{self.channel}")
+                     if not f.name.startswith("._")]
+            if found and self.station_prefix:
+                want = self.station_prefix.rstrip("_-").lower()
+                matched = [
+                    f for f in found
+                    if (parse_edl_station(f) or "").lower() == want
+                ]
+                if matched:
+                    found = matched
+                else:
+                    seen = sorted(
+                        {parse_edl_station(f) or "?" for f in found}
+                    )
+                    self.logger.warning(
+                        f"No {self.channel} files for station "
+                        f"{self.station_prefix.rstrip('_-')}; using all "
+                        f"{len(found)} found instead, from {seen}"
+                    )
+            if found:
+                found = sort_by_timestamp(found)
+                self.logger.info(f"Found {len(found)} files for {self.channel}")
+                return found
 
         # If data_path is a file, use it directly
         elif self.data_path.is_file():
@@ -484,33 +704,35 @@ class UoADataReader:
         """
         Read and concatenate all files for this channel.
 
-        :return: Array of float values in microVolt (μV)
+        :return: Array of float values in microVolt (uV)
         :rtype: np.ndarray
 
         **File Format**:
             - ASCII text, one sample per line
-            - Values in microVolt (μV)
+            - Values in microVolt (uV)
             - No header
-            - Lines with non-numeric content are skipped
-
-        **Why ASCII**: The PR6-24 outputs ASCII for simplicity and
-        field-readability, despite higher disk usage than binary formats.
+            - a file that will not parse is skipped, with an error logged
         """
         files = self.find_files()
+        self.files = files
         if not files:
-            self.logger.error(f"No data files found for channel {self.channel}")
+            # find_files has already warned. A deployment can legitimately
+            # leave a channel out, four component being the common one, so
+            # only having none of them is an error.
+            self.logger.debug(f"No data files for channel {self.channel}")
             return np.array([])
 
         all_data = []
+        self.segments = []
         for file_path in files:
             try:
-                # Read ASCII file: one float per line
-                # Use numpy for speed, skip invalid lines
-                data = np.loadtxt(file_path, dtype=float, comments=None)
-
-                # Handle both 1D array (single column) and 2D array (if accidentally multi-column)
-                if data.ndim > 1:
-                    data = data.flatten()
+                if is_miniseed(file_path):
+                    data, start, rate = read_edl_miniseed(file_path)
+                    self.segments.append((start, rate))
+                else:
+                    data = np.loadtxt(file_path, dtype=float, comments=None)
+                    if data.ndim > 1:
+                        data = data.flatten()
 
                 all_data.append(data)
                 self.logger.debug(f"Read {len(data)} samples from {file_path.name}")
@@ -540,15 +762,16 @@ class UoAReader:
     """
     MTH5-compatible reader for Earth Data PR6-24 ASCII data files.
 
-    Reads EDL magnetotelluric data with handling of hardware calibrations:
-    - Bz voltage divider (15kΩ/10kΩ) correction
-    - Electric field terminal box gain (×10) removal
-    - Bartington fluxgate or LEMI-120 coil calibration
+    Builds the UoA response chain alongside the data:
+    - Bz voltage divider, 15 kOhm / 10 kOhm
+    - electric field terminal box, x10
+    - Bartington fluxgate or LEMI-120 coil sensitivity
 
     **File Discovery**:
         - Day-numbered folders (001-366)
         - Flat directories
         - Pre-concatenated files
+        - ASCII or miniSEED, detected per file
         - Works without recorder.ini or GPS files
 
     :param data_path: Path to data directory or file
@@ -559,11 +782,23 @@ class UoAReader:
     :type kwargs: dict
 
     :Keyword Arguments:
-        * **sample_rate** (float) - Sample rate in Hz (required if not auto-detected)
+        * **sample_rate** (float) - Sample rate in Hz, inferred from the file
+          stamps when not given
         * **station_id** (str) - Station identifier (default: auto-detect from path)
         * **station_prefix** (str) - File prefix like 'EDL_', 'MT001_' (default: '')
         * **dipole_length_ex** (float) - Ex dipole length in meters (default: 1.0)
         * **dipole_length_ey** (float) - Ey dipole length in meters (default: 1.0)
+        * **ex_azimuth** (float) - as-laid Ex azimuth in degrees (default: 0)
+        * **ey_azimuth** (float) - as-laid Ey azimuth in degrees (default: 90)
+        * **efield_gain** (float) - E terminal box gain, 1.0 if none was used
+          (default: 10.0)
+        * **declination** (float) - magnetic declination in degrees (default: 0)
+        * **geographic_name** (str) - site name from the deployment notes
+        * **acquired_by** (str) - operator from the deployment notes
+        * **data_logger_id** (str) - recorder serial from the deployment notes
+        * **magnetometer_id** (str) - sensor serial from the deployment notes
+        * **decimate_to** (float) - decimate to this rate in Hz before the
+          response is attached, e.g. 1.0 for long period (default: None)
         * **calibration_fn_bx** (str) - LEMI-120 .rsp file for Bx (if lemi120 mode)
         * **calibration_fn_by** (str) - LEMI-120 .rsp file for By (if lemi120 mode)
         * **calibration_fn_bz** (str) - LEMI-120 .rsp file for Bz (if lemi120 mode)
@@ -590,25 +825,26 @@ class UoAReader:
         >>> run_ts = reader.read()
 
     .. note::
-        - Sample rate MUST be provided (no automatic detection from ASCII files)
-        - Bz data is automatically corrected for voltage divider
-        - Ex/Ey data is automatically corrected for terminal box gain
+        - Sample rate is inferred from consecutive file names when not given
+        - Samples stay as recorded logger voltage in microVolt
+        - The Bz divider and terminal box gain are attached as response
+          filters
         - For accurate E-field, provide actual dipole lengths in meters
     """
 
-    def __init__(
-        self, data_path: Union[str, Path], sensor_type: str = "bartington", **kwargs
-    ):
+    def __init__(self, data_path, sensor_type: str = "bartington", **kwargs):
         self.logger = logger
-        self.data_path = Path(data_path)
+        # a directory, a single file, or the file list a collection built for
+        # one run
+        if isinstance(data_path, (list, tuple, set)):
+            self.data_path = [Path(f) for f in data_path]
+        else:
+            self.data_path = Path(data_path)
         self.sensor_type = sensor_type.lower()
 
         # Required parameters
+        # may be None; read() then works it out from the file stamps
         self.sample_rate = kwargs.get("sample_rate", None)
-        if self.sample_rate is None:
-            raise ValueError(
-                "sample_rate parameter is required (EDL ASCII files don't contain this info)"
-            )
 
         # Station identification
         self.station_id = kwargs.get("station_id", None)
@@ -617,6 +853,23 @@ class UoAReader:
         # Dipole lengths for electric field conversion
         self.dipole_length_ex = kwargs.get("dipole_length_ex", 1.0)
         self.dipole_length_ey = kwargs.get("dipole_length_ey", 1.0)
+
+        # as-laid electrode azimuths from the field notes, ex north and ey
+        # east by default; south or west reverses the channel sign
+        self.ex_azimuth = kwargs.get("ex_azimuth", NOMINAL_AZIMUTH["ex"])
+        self.ey_azimuth = kwargs.get("ey_azimuth", NOMINAL_AZIMUTH["ey"])
+
+        # decimate before the response is attached; RunTS.decimate drops
+        # channel_response but leaves the metadata claiming it is applied
+        self.decimate_to = kwargs.get("decimate_to", None)
+
+        # from the deployment notes, nothing in the data files carries these
+        self.efield_gain = kwargs.get("efield_gain", E_TERMINAL_BOX_GAIN)
+        self.declination = kwargs.get("declination", 0.0)
+        self.geographic_name = kwargs.get("geographic_name", None)
+        self.acquired_by = kwargs.get("acquired_by", None)
+        self.data_logger_id = kwargs.get("data_logger_id", None)
+        self.magnetometer_id = kwargs.get("magnetometer_id", None)
 
         # Calibration files (LEMI-120 mode only)
         self.calibration_fn_bx = kwargs.get("calibration_fn_bx", None)
@@ -631,6 +884,7 @@ class UoAReader:
         # Data storage
         self.data = None
         self.n_samples = 0
+        self.start_time: Optional[datetime] = None
 
     def _get_station_id(self) -> str:
         """
@@ -646,6 +900,13 @@ class UoAReader:
         if self.station_id:
             return self.station_id
 
+        # a list holds the files of one run, which sit beside each other
+        if isinstance(self.data_path, list):
+            if not self.data_path:
+                return "unknown"
+            first = self.data_path[0]
+            return parse_edl_station(first) or first.parent.name
+
         # Use parent directory name
         return (
             self.data_path.parent.name
@@ -658,7 +919,7 @@ class UoAReader:
         Read EDL data files and return a RunTS object.
 
         - Stores RAW microVolt in data array
-        - Describes all calibrations as filters with filter.applied = False
+        - Describes the hardware response as filters, applied=True
 
         Process:
         1. Find and read all 5 MT channels (BX, BY, BZ, EX, EY)
@@ -674,15 +935,20 @@ class UoAReader:
         **Calibration Filters Created**:
 
         For Bartington (long-period):
-            - Bz: voltage divider filter (×2.5), then Bartington filter (0.007 nT/μV)
-            - Bx, By: Bartington filter (0.007 nT/μV)
-            - Ex, Ey: terminal box gain filter (÷10), then dipole filter
+            - hx, hy: Bartington filter, nT to uV
+            - hz: Bartington filter then the divider, nT to uV
+            - ex, ey: dipole filter then the terminal box, mV/km to uV
 
         For LEMI-120 (broadband):
-            - Bx, By, Bz: LEMI-120 frequency response from .rsp files
-            - Ex, Ey: terminal box gain filter (÷10), then dipole filter
+            - hx, hy, hz: .rsp response, plus the flat-band gain if normalized
+            - ex, ey: dipole filter then the terminal box, mV/km to uV
         """
-        self.logger.info(f"Reading EDL data from {self.data_path}")
+        source = (
+            f"{len(self.data_path)} files"
+            if isinstance(self.data_path, list)
+            else self.data_path
+        )
+        self.logger.info(f"Reading EDL data from {source}")
         self.logger.info(
             f"Sensor type: {self.sensor_type}, Sample rate: {self.sample_rate} Hz"
         )
@@ -690,6 +956,8 @@ class UoAReader:
         # Define MT channels
         channels = ["BX", "BY", "BZ", "EX", "EY"]
         channel_data = {}
+        channel_files = {}
+        channel_segments = {}
 
         # Read each channel
         for channel in channels:
@@ -701,6 +969,8 @@ class UoAReader:
                 continue
 
             channel_data[channel] = data
+            channel_files[channel] = reader.files
+            channel_segments[channel] = reader.segments
 
         # Check we have data
         if not channel_data:
@@ -717,14 +987,99 @@ class UoAReader:
             f"Read {min_length} samples across {len(channel_data)} channels"
         )
 
-        # Build metadata objects ONCE (reuse pattern from LEMI-423)
+        header_rates = {rate for segs in channel_segments.values() for _, rate in segs}
+        if self.sample_rate is None and header_rates:
+            if len(header_rates) > 1:
+                self.logger.warning(f"Mixed sample rates in headers: {header_rates}")
+            self.sample_rate = max(header_rates)
+            self.logger.info(f"Sample rate {self.sample_rate} Hz from miniSEED headers")
+        if self.sample_rate is None:
+            for files in channel_files.values():
+                self.sample_rate = infer_sample_rate(files)
+                if self.sample_rate is not None:
+                    break
+            if self.sample_rate is None:
+                raise ValueError(
+                    "sample_rate could not be determined; pass sample_rate explicitly"
+                )
+
+        native_rate = None
+        if self.decimate_to:
+            ratio = self.sample_rate / float(self.decimate_to)
+            if ratio < 1 or abs(ratio - round(ratio)) > 1e-9:
+                raise ValueError(
+                    f"Cannot decimate {self.sample_rate} Hz to "
+                    f"{self.decimate_to} Hz, the factor is not a whole number"
+                )
+            factor = int(round(ratio))
+            if factor > 1:
+                for channel in list(channel_data):
+                    channel_data[channel] = decimate_series(
+                        channel_data[channel], factor
+                    )
+                native_rate = self.sample_rate
+                self.sample_rate = float(self.decimate_to)
+                self.n_samples = min(len(v) for v in channel_data.values())
+                self.logger.info(
+                    f"Decimated by {factor} to {self.sample_rate} Hz, "
+                    f"{self.n_samples} samples"
+                )
+
+        # miniSEED carries the start time; ASCII does not, so fall back to
+        # the stamp in the file name.
+        stamps = [start for segs in channel_segments.values() for start, _ in segs]
+        if not stamps:
+            stamps = [
+                stamp
+                for files in channel_files.values()
+                for stamp in (parse_edl_timestamp(f) for f in files)
+                if stamp is not None
+            ]
+        self.start_time = min(stamps) if stamps else None
+        if self.start_time is None:
+            self.logger.warning(
+                "No YYMMDDhhmmss stamp in any file name; start time left unset"
+            )
+        else:
+            self.logger.info(f"Run starts {self.start_time.isoformat()}")
+
+        # Files are concatenated end to end, so warn if they do not join up.
+        # File length is a recorder setting, so compare total samples against
+        # the wall-clock span rather than assuming a fixed file duration.
+        # count_samples reads the file, so it is in the rate the file was
+        # written at, which is not self.sample_rate once decimation has run
+        file_rate = native_rate if native_rate else self.sample_rate
+        for channel, files in channel_files.items():
+            if channel not in channel_data or len(files) < 2:
+                continue
+            stamped = sorted(
+                ((parse_edl_timestamp(f), f) for f in files if parse_edl_timestamp(f)),
+                key=lambda pair: pair[0],
+            )
+            if len(stamped) < 2 or is_miniseed(stamped[-1][1]):
+                continue
+            # the run ends where the last file ends, not at its start stamp
+            span = (stamped[-1][0] - stamped[0][0]).total_seconds() + (
+                count_samples(stamped[-1][1]) / file_rate
+            )
+            recorded = len(channel_data[channel]) / self.sample_rate
+            missing = span - recorded
+            if missing > 1.0 / self.sample_rate:
+                self.logger.warning(
+                    f"{channel}: {missing:.1f} s missing between files; samples "
+                    "after a gap will be dated early. Use UoACollection to split "
+                    "the deployment into runs."
+                )
+
         station_meta = self._build_station_metadata()
         run_meta = self._build_run_metadata()
+        if self.start_time is not None:
+            run_meta.time_period.start = self.start_time.isoformat()
 
         # Build ChannelTS objects with RAW data and calibration filters
         ch_objs: List[ChannelTS] = []
 
-        # Mapping: file channel name → (MTH5 code, type, channel_number)
+        # Mapping: file channel name -> (MTH5 code, type, channel_number)
         mapping = {
             "BX": ("hx", "magnetic", 0),
             "BY": ("hy", "magnetic", 1),
@@ -743,8 +1098,10 @@ class UoAReader:
 
             # Build channel metadata
             ch_metadata = self._get_channel_metadata(code, ch_num)
+            if self.start_time is not None:
+                ch_metadata.time_period.start = self.start_time.isoformat()
 
-            # Create calibration filters (NOT applied to data)
+            # Response filters describing what is in the data
             if ch_type == "magnetic":
                 channel_response = self._create_magnetic_filters(code)
             else:  # electric
@@ -752,12 +1109,14 @@ class UoAReader:
 
             # Update metadata to reference filters
             if channel_response is not None:
-                for sequence, filter_obj in enumerate(
+                for stage, filter_obj in enumerate(
                     channel_response.filters_list, start=1
                 ):
+                    # applied=True means the response is present in the data,
+                    # which is what tells aurora to divide it back out
                     ch_metadata.add_filter(
                         AppliedFilter(
-                            name=filter_obj.name, sequence=sequence, applied=False
+                            name=filter_obj.name, stage=stage, applied=True
                         )
                     )
 
@@ -782,36 +1141,25 @@ class UoAReader:
 
     def _create_magnetic_filters(self, component: str) -> Optional[ChannelResponse]:
         """
-        Create calibration filters for magnetic channels (NOT applied to data).
+        Build the response chain for a magnetic channel.
 
-        Following MTH5 standard: data stays as raw microVolt, filters describe
-        the calibration chain.
+        Ordered physical to recorded: sensor calibration first, then the Bz
+        divider where it applies.
 
-        :param component: Component name ('hx', 'hy', or 'hz')
+        :param component: component name ('hx', 'hy' or 'hz')
         :type component: str
-        :return: ChannelResponse with calibration filters, or None
-        :rtype: ChannelResponse or None
-
-        **Filter chains created**:
-
-        Bartington mode (long-period):
-            - Bz: [voltage_divider_filter, bartington_filter]
-            - Bx, By: [bartington_filter]
-
-        LEMI-120 mode (broadband):
-            - Normalized .rsp (nT→nT): [dc_gain_filter, frequency_response]
-            - Absolute .rsp (nT→mV): [frequency_response]
+        :return: channel response, or None if a .rsp file is missing
+        :rtype: :class:`mt_metadata.timeseries.filters.ChannelResponse` or None
         """
         filters = []
 
         if self.sensor_type == "bartington":
-            # Bartington Mag-03 fluxgate (long-period)
-            if component == "hz":
-                # Bz: needs voltage divider correction first
-                filters.append(create_bz_divider_filter())
-
-            # Then Bartington calibration for all components
+            # nT -> sensor microVolt, then the divider on Bz only
             filters.append(create_bartington_calibration_filter(component))
+
+            if component == "hz":
+                # Bz sits behind the 15k/10k divider on its way to the logger
+                filters.append(create_bz_divider_filter())
 
         elif self.sensor_type == "lemi120":
             # LEMI-120 induction coils (broadband)
@@ -830,11 +1178,16 @@ class UoAReader:
             try:
                 coil_filter = read_uoa_coil_response(cal_fn, coil_number=component)
 
-                # If .rsp file is normalized (nT → nT), need DC gain filter first
+                filters.append(coil_filter)
+
+                # A normalized .rsp is nT -> nT, so the nT -> microVolt DC
+                # sensitivity has to follow it to reach recorded units.
                 if coil_filter.units_in == coil_filter.units_out == "nanoTesla":
                     filters.append(create_lemi120_dc_gain_filter(component))
-
-                filters.append(coil_filter)
+                elif coil_filter.units_out == "milliVolt":
+                    # the table already holds the sensitivity, it just stops at
+                    # milliVolt while the logger records microVolt
+                    filters.append(create_mv_to_uv_filter())
             except Exception as e:
                 self.logger.error(f"Error reading calibration file {cal_fn}: {e}")
                 return None
@@ -847,31 +1200,19 @@ class UoAReader:
 
     def _create_electric_filters(self, component: str) -> Optional[ChannelResponse]:
         """
-        Create calibration filters for electric channels (NOT applied to data).
+        Build the response chain for an electric channel.
 
-        Following MTH5 standard: data stays as raw microVolt, filters describe
-        the calibration chain.
+        Ordered physical to recorded: dipole length first, then the terminal
+        box gain.
 
-        :param component: Component name ('ex' or 'ey')
+        :param component: component name ('ex' or 'ey')
         :type component: str
-        :return: ChannelResponse with calibration filters
-        :rtype: ChannelResponse
-
-        **Filter chain created**:
-        [terminal_box_gain_filter, dipole_length_filter]
-
-        **Why these filters**:
-        1. Terminal box gain filter: Removes ×10 hardware pre-amplifier gain
-        2. Dipole length filter: Normalizes by dipole length to get E-field
-
-        Final conversion: μV → μV (÷10) → mV/km
+        :return: channel response
+        :rtype: :class:`mt_metadata.timeseries.filters.ChannelResponse`
         """
         filters = []
 
-        # Filter 1: Remove terminal box gain (÷10)
-        filters.append(create_efield_gain_filter())
-
-        # Filter 2: Normalize by dipole length
+        # mV/km -> electrode microVolt, then the terminal box
         dipole_length = (
             self.dipole_length_ex if component == "ex" else self.dipole_length_ey
         )
@@ -881,7 +1222,11 @@ class UoAReader:
             )
             dipole_length = 1.0
 
-        filters.append(create_dipole_length_filter(component, dipole_length))
+        azimuth = self.ex_azimuth if component == "ex" else self.ey_azimuth
+        filters.append(
+            create_dipole_length_filter(component, dipole_length, azimuth)
+        )
+        filters.append(create_efield_gain_filter(self.efield_gain))
 
         return ChannelResponse(filters_list=filters)
 
@@ -902,8 +1247,15 @@ class UoAReader:
         s.location.longitude = self.longitude if self.longitude is not None else 0.0
         s.location.elevation = self.elevation if self.elevation is not None else 0.0
 
-        s.location.declination.value = 0.0  # User should update if known
-        s.geographic_name = "Unknown"  # User should update
+        s.location.declination.value = self.declination
+
+        # UoA long-period fluxgates were squared to magnetic north, so the
+        # channels sit in the geomagnetic frame, not the geographic one
+        s.orientation.reference_frame = "geomagnetic"
+        if self.geographic_name:
+            s.geographic_name = self.geographic_name
+        if self.acquired_by:
+            s.acquired_by.name = self.acquired_by
 
         return s
 
@@ -921,9 +1273,9 @@ class UoAReader:
         # Data logger information
         r.data_logger.model = "PR6-24"
         r.data_logger.manufacturer = "Earth Data"
-        r.data_logger.type = (
-            "broadband" if self.sensor_type == "lemi120" else "long period"
-        )
+        if self.data_logger_id:
+            r.data_logger.id = str(self.data_logger_id)
+        r.data_logger.type = "digitizer"
 
         # Data type
         r.data_type = "BBMT" if self.sensor_type == "lemi120" else "LPMT"
@@ -944,6 +1296,11 @@ class UoAReader:
         if component in ["hx", "hy", "hz"]:
             ch_metadata = Magnetic()
             ch_metadata.type = "magnetic"
+            # UoA fluxgates were set to magnetic north
+            azimuth_map = {"hx": 0, "hy": 90, "hz": 0}
+            tilt_map = {"hx": 0, "hy": 0, "hz": 90}
+            ch_metadata.measurement_azimuth = azimuth_map.get(component, 0)
+            ch_metadata.measurement_tilt = tilt_map.get(component, 0)
             # Store RAW microVolt (following MTH5 standard like Zen, Phoenix, NIMS)
             ch_metadata.units = "microVolt"
 
@@ -957,6 +1314,8 @@ class UoAReader:
             ch_metadata.sensor.type = (
                 "fluxgate" if self.sensor_type == "bartington" else "induction coil"
             )
+            if self.magnetometer_id:
+                ch_metadata.sensor.id = str(self.magnetometer_id)
 
         else:  # electric
             ch_metadata = Electric()
@@ -965,12 +1324,13 @@ class UoAReader:
             ch_metadata.units = "microVolt"
 
             # Store dipole length in metadata for filter application
+            # the dipole filter carries the sign that brings the channel
+            # into the nominal north/east frame, so report that frame here
             if component == "ex":
                 ch_metadata.dipole_length = self.dipole_length_ex
-                ch_metadata.measurement_azimuth = 0.0  # Default N-S
-            else:  # ey
+            else:
                 ch_metadata.dipole_length = self.dipole_length_ey
-                ch_metadata.measurement_azimuth = 90.0  # Default E-W
+            ch_metadata.measurement_azimuth = NOMINAL_AZIMUTH[component]
 
             ch_metadata.measurement_tilt = 0.0
 
@@ -988,93 +1348,26 @@ class UoAReader:
 
 def read_uoa(data_path: Union[str, Path], **kwargs) -> RunTS:
     """
-    Read Earth Data PR6-24 ASCII data files and return a RunTS.
+    Read Earth Data PR6-24 (EDL) ASCII data into a RunTS.
 
-    Convenience function for reading EDL magnetotelluric data with automatic
-    handling of hardware calibrations (Bz voltage divider, E-field terminal box gain).
+    Thin wrapper around :class:`UoAReader`; see that class for the full list
+    of keyword arguments and for what the response filters describe.
 
-    :param data_path: Path to data directory or file
-    :type data_path: str or Path
-    :param kwargs: Additional parameters (see below)
+    :param data_path: path to a station directory or a single file
+    :type data_path: str or :class:`pathlib.Path`
+    :param kwargs: passed straight through to :class:`UoAReader`
     :type kwargs: dict
-
-    :Keyword Arguments:
-        * **sensor_type** (str) - 'bartington' or 'lemi120' (default: 'bartington')
-        * **sample_rate** (float) - Sample rate in Hz (REQUIRED)
-        * **station_id** (str) - Station identifier
-        * **station_prefix** (str) - File prefix like 'EDL_', 'MT001_'
-        * **dipole_length_ex** (float) - Ex dipole length in meters (default: 1.0)
-        * **dipole_length_ey** (float) - Ey dipole length in meters (default: 1.0)
-        * **calibration_fn_bx** (str) - LEMI-120 .rsp file for Bx (broadband mode)
-        * **calibration_fn_by** (str) - LEMI-120 .rsp file for By (broadband mode)
-        * **calibration_fn_bz** (str) - LEMI-120 .rsp file for Bz (broadband mode)
-        * **latitude** (float) - Station latitude in decimal degrees
-        * **longitude** (float) - Station longitude in decimal degrees
-        * **elevation** (float) - Station elevation in meters
-
-    :return: RunTS object containing ChannelTS for hx, hy, hz, ex, ey
-    :rtype: RunTS
+    :return: run time series with the hardware response attached
+    :rtype: :class:`mt_timeseries.RunTS`
 
     :Example:
-        >>> from mth5.io.edl import read_uoa
-        >>>
-        >>> # Long-period with Bartington fluxgates
-        >>> run_ts = read_uoa(
-        ...     '/data/site1',
-        ...     sensor_type='bartington',
-        ...     sample_rate=10.0,
-        ...     dipole_length_ex=50.0,
-        ...     dipole_length_ey=50.0,
-        ...     station_id='MT001'
-        ... )
-        >>>
-        >>> # Broadband with LEMI-120 induction coils
-        >>> run_ts = read_uoa(
-        ...     '/data/site2',
-        ...     sensor_type='lemi120',
-        ...     sample_rate=500.0,
-        ...     calibration_fn_bx='/path/to/l120_01.rsp',
-        ...     calibration_fn_by='/path/to/l120_02.rsp',
-        ...     calibration_fn_bz='/path/to/l120_03.rsp',
-        ...     dipole_length_ex=50.0,
-        ...     dipole_length_ey=50.0
-        ... )
-        >>>
-        >>> # Access channel data
-        >>> hx_data = run_ts.hx.to_numpy()
-        >>> print(f"Station: {run_ts.station_metadata.id}")
 
-    **Notes**:
+    .. code-block:: python
 
-    1. **Sample Rate** (REQUIRED):
-       ASCII files don't contain sample rate - you must provide it
-
-    2. **Hardware Calibrations** (automatic):
-       - Bz voltage divider: 15kΩ/10kΩ = 0.4 (data multiplied by 2.5)
-       - E-field terminal box: ×10 gain (data divided by 10)
-
-    3. **Bartington Mode** (long-period, ~10 Hz):
-       - Bx, By: 0.007 nT/μV
-       - Bz: 0.0175 nT/μV (includes voltage divider)
-       - Output units: nanotesla (nT)
-
-    4. **LEMI-120 Mode** (broadband, ~100-500 Hz):
-       - Requires calibration .rsp files
-       - Frequency response stored but not applied (filter.applied = False)
-       - Output units: millivolts (mV)
-
-    5. **Electric Fields**:
-       - Always corrected for terminal box gain (÷10)
-       - Normalized by dipole length
-       - Output units: mV/m
-
-    .. note::
-        File organization is flexible - works with day folders, flat directories,
-        or pre-concatenated files.
-
-    .. seealso::
-        :class:`UoAReader` - Main reader class
-        :func:`read_uoa_coil_response` - Read LEMI-120 calibration files
+        >>> from mt_io.uoa import read_uoa
+        >>> run = read_uoa("/data/FR17", sensor_type="bartington",
+        ...                sample_rate=10.0, dipole_length_ex=50.0,
+        ...                dipole_length_ey=50.0)
     """
     reader = UoAReader(data_path, **kwargs)
     return reader.read()

@@ -135,6 +135,25 @@ def lemi_hemisphere_parser(hemisphere: str) -> int:
     return 1
 
 
+def lemi_parse_position_columns(data: pd.DataFrame) -> pd.DataFrame:
+    """
+    Convert the position columns in place, one parse per distinct value.
+
+    A converter in read_csv runs per cell; the positions barely change
+    within a file, so mapping the few distinct values is far cheaper.
+    """
+    for column, parser in (
+        ("latitude", lemi_position_parser),
+        ("longitude", lemi_position_parser),
+        ("lat_hemisphere", lemi_hemisphere_parser),
+        ("lon_hemisphere", lemi_hemisphere_parser),
+    ):
+        if column in data.columns:
+            values = {v: parser(v) for v in data[column].unique()}
+            data[column] = data[column].map(values)
+    return data
+
+
 class LEMI424:
     """
     Read and process LEMI424 magnetotelluric data files.
@@ -441,7 +460,7 @@ class LEMI424:
             Median latitude in degrees or None if no data is loaded.
 
         """
-        if self._has_data():
+        if self._has_data() and "latitude" in self.data.columns:
             return self.data.latitude.median() * self.data.lat_hemisphere.median()
 
     @property
@@ -455,7 +474,7 @@ class LEMI424:
             Median longitude in degrees or None if no data is loaded.
 
         """
-        if self._has_data():
+        if self._has_data() and "longitude" in self.data.columns:
             return self.data.longitude.median() * self.data.lon_hemisphere.median()
 
     @property
@@ -469,7 +488,7 @@ class LEMI424:
             Median elevation in meters or None if no data is loaded.
 
         """
-        if self._has_data():
+        if self._has_data() and "elevation" in self.data.columns:
             return self.data.elevation.median()
 
     @property
@@ -483,10 +502,15 @@ class LEMI424:
             Number of samples or None if no data/file available.
 
         """
-        if self._has_data():
+        if self._has_data() and not getattr(self, "_metadata_only", False):
             return self.data.shape[0]
         elif self.fn is not None and self.fn.exists():
-            return round(self.fn.stat().st_size / 152.0)
+            # rows are close to fixed width, so the first line sets the size
+            with open(self.fn, "rb") as fid:
+                row = len(fid.readline())
+            if row == 0:
+                return 0
+            return round(self.fn.stat().st_size / row)
 
     @property
     def gps_lock(self) -> Any | None:
@@ -499,7 +523,7 @@ class LEMI424:
             GPS fix values or None if no data is loaded.
 
         """
-        if self._has_data():
+        if self._has_data() and "gps_fix" in self.data.columns:
             return self.data.gps_fix.values
 
     @property
@@ -515,9 +539,12 @@ class LEMI424:
         """
         s = Station()
         if self._has_data():
-            s.location.latitude = self.latitude
-            s.location.longitude = self.longitude
-            s.location.elevation = self.elevation
+            if self.latitude is not None:
+                s.location.latitude = self.latitude
+            if self.longitude is not None:
+                s.location.longitude = self.longitude
+            if self.elevation is not None:
+                s.location.elevation = self.elevation
             s.time_period.start = self.start
             s.time_period.end = self.end
             s.add_run(self.run_metadata)
@@ -586,12 +613,13 @@ class LEMI424:
         if fast:
             try:
                 self.read_metadata()
+                names = self._sniff_column_names()
                 data = pd.read_csv(
                     self.fn,
                     delimiter=r"\s+",
-                    names=self.file_column_names,
-                    dtype=self.dtypes,
-                    usecols=(
+                    names=names,
+                    dtype={k: v for k, v in self.dtypes.items() if k in names},
+                    usecols=tuple(c for c in (
                         "bx",
                         "by",
                         "bz",
@@ -610,14 +638,9 @@ class LEMI424:
                         "n_satellites",
                         "gps_fix",
                         "time_diff",
-                    ),
-                    converters={
-                        "latitude": lemi_position_parser,
-                        "longitude": lemi_position_parser,
-                        "lat_hemisphere": lemi_hemisphere_parser,
-                        "lon_hemisphere": lemi_hemisphere_parser,
-                    },
+                    ) if c in names),
                 )
+                data = lemi_parse_position_columns(data)
                 time_index = pd.date_range(
                     start=self.start.iso_no_tz,
                     end=self.end.iso_no_tz,
@@ -627,6 +650,7 @@ class LEMI424:
                     raise ValueError("Missing a time stamp use read with fast=False")
                 data.index = time_index
                 self.data = data
+                self._metadata_only = False
                 return
             except ValueError:
                 self.logger.warning(
@@ -637,19 +661,15 @@ class LEMI424:
         if self.n_samples > self.chunk_size:
             st = MTime(time_stamp=None).now()
             dfs = []
+            names = self._sniff_column_names()
             for chunk in pd.read_csv(
                 self.fn,
                 delimiter=r"\s+",
-                names=self.file_column_names,
-                dtype=self.dtypes,
-                converters={
-                    "latitude": lemi_position_parser,
-                    "longitude": lemi_position_parser,
-                    "lat_hemisphere": lemi_hemisphere_parser,
-                    "lon_hemisphere": lemi_hemisphere_parser,
-                },
+                names=names,
+                dtype={k: v for k, v in self.dtypes.items() if k in names},
                 chunksize=self.chunk_size,
             ):
+                chunk = lemi_parse_position_columns(chunk)
                 # Create date index for this chunk
                 chunk.index = lemi_date_parser(
                     chunk["year"],
@@ -669,25 +689,24 @@ class LEMI424:
                 raise ValueError("File is empty or contains no valid data")
 
             self.data = pd.concat(dfs)
+            self._metadata_only = False
             et = MTime(time_stamp=None).now()
             self.logger.debug(f"Reading {self.fn.name} took {et - st:.2f} seconds")
         else:
             st = MTime(time_stamp=None).now()
+            names = self._sniff_column_names()
             self.data = pd.read_csv(
                 self.fn,
                 delimiter=r"\s+",
-                names=self.file_column_names,
-                dtype=self.dtypes,
-                converters={
-                    "latitude": lemi_position_parser,
-                    "longitude": lemi_position_parser,
-                    "lat_hemisphere": lemi_hemisphere_parser,
-                    "lon_hemisphere": lemi_hemisphere_parser,
-                },
+                names=names,
+                dtype={k: v for k, v in self.dtypes.items() if k in names},
             )
 
             if self.data.empty:
                 raise ValueError("File is empty or contains no valid data")
+
+            self.data = lemi_parse_position_columns(self.data)
+            self._metadata_only = False
 
             # Create date index from individual date/time columns
             self.data.index = lemi_date_parser(
@@ -706,6 +725,23 @@ class LEMI424:
             et = MTime(time_stamp=None).now()
             self.logger.debug(f"Reading {self.fn.name} took {et - st:.2f} seconds")
 
+    def _sniff_column_names(self) -> list:
+        """
+        Column names for this file, from its first line.
+
+        Loggers running without a GPS block write 16 columns, ending at
+        battery; the full format carries 24.
+        """
+        with open(self.fn, "rb") as fid:
+            n_fields = len(fid.readline().split())
+        if n_fields == len(self.file_column_names):
+            return self.file_column_names
+        if n_fields == 16:
+            return self.file_column_names[:16]
+        raise ValueError(
+            f"Unrecognised LEMI-424 line with {n_fields} fields in {self.fn}"
+        )
+
     def read_metadata(self) -> None:
         """
         Read only first and last rows to get important metadata.
@@ -715,28 +751,28 @@ class LEMI424:
 
         """
 
-        with open(self.fn) as fid:
-            first_line = fid.readline()
-            last_line = first_line  # Default to first line for single-line files
-            for line in fid:
-                last_line = line  # Update for multi-line files
+        with open(self.fn, "rb") as fid:
+            first_line = fid.readline().decode(errors="ignore")
+            fid.seek(0, 2)
+            size = fid.tell()
+            # the last line lives in the final block, no need to walk the file
+            fid.seek(max(0, size - 4096))
+            tail = fid.read().decode(errors="ignore").strip()
+        last_line = tail.rsplit("\n", 1)[-1] if tail else first_line
 
         if not first_line.strip():
             raise ValueError("File is empty or contains no valid data")
 
         lines = StringIO(f"{first_line}\n{last_line}")
 
-        self.data = pd.read_csv(
-            lines,
-            delimiter=r"\s+",
-            names=self.file_column_names,
-            dtype=self.dtypes,
-            converters={
-                "latitude": lemi_position_parser,
-                "longitude": lemi_position_parser,
-                "lat_hemisphere": lemi_hemisphere_parser,
-                "lon_hemisphere": lemi_hemisphere_parser,
-            },
+        names = self._sniff_column_names()
+        self.data = lemi_parse_position_columns(
+            pd.read_csv(
+                lines,
+                delimiter=r"\s+",
+                names=names,
+                dtype={k: v for k, v in self.dtypes.items() if k in names},
+            )
         )
 
         # Create date index from individual date/time columns
@@ -752,6 +788,8 @@ class LEMI424:
         self.data = self.data.drop(
             columns=["year", "month", "day", "hour", "minute", "second"]
         )
+        # the two row frame stands in for start/end, not the sample count
+        self._metadata_only = True
 
     def read_calibration(self, fn: str | Path) -> FrequencyResponseTableFilter:
         """
@@ -914,10 +952,13 @@ def read_lemi424(
     txt_obj = LEMI424(fn[0])
     txt_obj.read(fast=fast)
 
-    # read a list of files into a single run
+    # read a list of files into a single run, joined once at the end so the
+    # accumulated frame is not copied per file
     if len(fn) > 1:
+        frames = [txt_obj.data]
         for txt_file in fn[1:]:
             other = LEMI424(txt_file)
             other.read(fast=fast)
-            txt_obj += other
+            frames.append(other.data)
+        txt_obj.data = pd.concat(frames)
     return txt_obj.to_run_ts(e_channels=e_channels, calibration_dict=calibration_dict)

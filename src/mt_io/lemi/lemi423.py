@@ -5,9 +5,12 @@ LEMI-423 Reader
 
 Read LEMI-423 broadband magnetotelluric binary files (*.B423).
 
-Stores RAW counts with calibrations as unapplied filters (MTH5 standard).
+Stores raw counts and describes the hardware response as filters.
 
-:author: ben kay
+@author: ben kay (ben@auscope.org.au)
+
+:license: MIT
+
 """
 
 # =============================================================================
@@ -22,12 +25,13 @@ import numpy as np
 import pandas as pd
 from loguru import logger
 from mt_metadata.common import MTime
-from mt_metadata.timeseries import Electric, Magnetic, Run, Station
+from mt_metadata.timeseries import AppliedFilter, Electric, Magnetic, Run, Station
 from mt_metadata.timeseries.filters import (
     ChannelResponse,
     CoefficientFilter,
     FrequencyResponseTableFilter,
 )
+from mt_timeseries import ChannelTS, RunTS
 
 # File extensions (central dispatcher lower-cases extension)
 B423_EXTS = {"b423"}
@@ -64,16 +68,16 @@ class Read_Lemi_Header:
 
     **Lines 13+: Linear Calibration Coefficients**
         Magnetic channels (Bx, By, Bz):
-            - ``%Kmx = 2.909985e-06`` (gain for Bx: counts → nT)
-            - ``%Kmy = 2.909481e-06`` (gain for By: counts → nT)
-            - ``%Kmz = 2.908610e-06`` (gain for Bz: counts → nT)
+            - ``%Kmx = 2.909985e-06`` (gain for Bx: counts -> nT)
+            - ``%Kmy = 2.909481e-06`` (gain for By: counts -> nT)
+            - ``%Kmz = 2.908610e-06`` (gain for Bz: counts -> nT)
             - ``%Ax = -5.002100e+01`` (offset for Bx in nT)
             - ``%Ay = -4.990500e+01`` (offset for By in nT)
             - ``%Az = -4.994700e+01`` (offset for Bz in nT)
 
         Electric channels (Ex, Ey):
-            - ``%Ke1 = 2.910737e-04`` (gain for Ex: counts → V)
-            - ``%Ke2 = 2.909547e-04`` (gain for Ey: counts → V)
+            - ``%Ke1 = 2.910737e-04`` (gain for Ex: counts -> V)
+            - ``%Ke2 = 2.909547e-04`` (gain for Ey: counts -> V)
             - ``%Ae1 = -5.004800e+03`` (offset for Ex in V)
             - ``%Ae2 = -4.958000e+03`` (offset for Ey in V)
 
@@ -86,7 +90,7 @@ class Read_Lemi_Header:
     -------------------
     All channels use linear calibration:
 
-        **physical_value = (raw_counts × K) + A**
+        **physical_value = (raw_counts x K) + A**
 
     Where K is the gain coefficient and A is the offset.
 
@@ -205,29 +209,30 @@ class Read_Lemi_Data:
         Time-indexed DataFrame with columns Bx, By, Bz, Ex, Ey (RAW counts, int32).
     """
 
+    # Binary: 30 bytes/sample, little-endian, after a 1024-byte header
+    binary_format = np.dtype(
+        [
+            ("time", "<u4"),
+            ("tick", "<u2"),
+            ("Bx", "<i4"),
+            ("By", "<i4"),
+            ("Bz", "<i4"),
+            ("Ex", "<i4"),
+            ("Ey", "<i4"),
+            ("sync", "<i1"),
+            ("stage", "<u1"),
+            ("CRC", "<i2"),
+        ]
+    )
+
     def __init__(self, binary_file: Union[str, Path], coefficients: Dict[str, float]):
         self.binary_file = str(binary_file)
         self.coefficients = coefficients
 
     def read_dataframe(self) -> pd.DataFrame:
-        # Binary: 30 bytes/sample, little-endian, 1024-byte header
-        binary_format = np.dtype(
-            [
-                ("time", "<u4"),
-                ("tick", "<u2"),
-                ("Bx", "<i4"),
-                ("By", "<i4"),
-                ("Bz", "<i4"),
-                ("Ex", "<i4"),
-                ("Ey", "<i4"),
-                ("sync", "<i1"),
-                ("stage", "<u1"),
-                ("CRC", "<i2"),
-            ]
-        )
         with open(self.binary_file, "rb") as f:
             f.read(1024)  # skip header
-            arr = np.fromfile(f, dtype=binary_format)
+            arr = np.fromfile(f, dtype=self.binary_format)
         if arr.size == 0:
             return pd.DataFrame(columns=["Bx", "By", "Bz", "Ex", "Ey"]).set_index(
                 pd.DatetimeIndex([], tz="UTC", name="time")
@@ -247,6 +252,38 @@ class Read_Lemi_Data:
 
         # Return RAW counts (no calibration applied)
         return df[["Bx", "By", "Bz", "Ex", "Ey"]].sort_index()
+
+    def read_summary(self) -> dict:
+        """
+        Read sample count, start, end and sample rate without the data.
+
+        The records are a fixed 30 bytes, so the count comes from the file
+        size, and the times from the time and tick columns alone. The full
+        columns are scanned because a bad GPS fix can put an out of order
+        stamp anywhere in the file.
+        """
+        record = self.binary_format
+        size = Path(self.binary_file).stat().st_size
+        n_samples = max(0, (size - 1024) // record.itemsize)
+        if n_samples == 0:
+            return {"n_samples": 0, "start": None, "end": None,
+                    "sample_rate": None}
+
+        arr = np.memmap(self.binary_file, dtype=record, mode="r",
+                        offset=1024, shape=(n_samples,))
+        ticks = np.asarray(arr["tick"], dtype=np.int64)
+        stamps = np.asarray(arr["time"], dtype=np.int64) * 1000 + ticks
+
+        def stamp(ms):
+            return pd.to_datetime(int(ms), unit="ms", utc=True)
+
+        tick_max = int(ticks.max())
+        return {
+            "n_samples": n_samples,
+            "start": stamp(stamps.min()),
+            "end": stamp(stamps.max()),
+            "sample_rate": float(tick_max + 1) if tick_max > 0 else None,
+        }
 
 
 def read_lemi_coil_response(calibration_fn, coil_number=None):
@@ -288,33 +325,59 @@ def create_lemi423_linear_calibration_filter(
     component: str, k_coeff: float, a_coeff: float
 ) -> CoefficientFilter:
     """
-    Create linear calibration filter for LEMI-423 channels.
+    Create the linear calibration filter for a LEMI-423 channel.
 
-    Formula: physical_value = (raw_counts × K) + A
+    The header gives physical = counts * K + A, so the gain is 1/K. The A
+    offset is not carried, as CoefficientFilter has no offset in its schema.
 
-    :param component: Channel component (hx, hy, hz, ex, ey)
-    :param k_coeff: Gain coefficient from header
-    :param a_coeff: Offset coefficient from header
-    :return: Coefficient filter (counts → nT or V)
+    :param component: component name ('hx', 'hy', 'hz', 'ex' or 'ey')
+    :type component: str
+    :param k_coeff: gain coefficient from the header
+    :type k_coeff: float
+    :param a_coeff: offset coefficient from the header, recorded in comments
+    :type a_coeff: float
+    :return: coefficient filter, nanoTesla or microVolt to count
+    :rtype: :class:`mt_metadata.timeseries.filters.CoefficientFilter`
     """
+    if k_coeff == 0:
+        k_coeff = 1.0
+
     coeff_filter = CoefficientFilter()
     coeff_filter.name = f"lemi423_linear_{component}"
-    coeff_filter.units_in = "counts"
-
-    # Set output units based on channel type
-    if component in ["hx", "hy", "hz"]:
-        coeff_filter.units_out = "nanotesla"
-    else:  # ex, ey
-        coeff_filter.units_out = "volts"
-
-    coeff_filter.gain = k_coeff
-    coeff_filter.offset = a_coeff
+    coeff_filter.units_in = "nanoTesla" if component in ("hx", "hy", "hz") else "microVolt"
+    coeff_filter.units_out = "count"
+    coeff_filter.gain = 1.0 / k_coeff
     coeff_filter.comments = (
-        f"LEMI-423 linear calibration: {component.upper()} = "
-        f"(counts × {k_coeff}) + {a_coeff}"
+        f"LEMI-423 {component.upper()}: {component.upper()} = "
+        f"counts x {k_coeff} + {a_coeff}; the offset is not carried"
     )
-
     return coeff_filter
+
+
+def create_lemi423_dipole_filter(
+    component: str, dipole_length: float
+) -> CoefficientFilter:
+    """
+    Create the dipole length filter for a LEMI-423 electric channel.
+
+    1 mV/km is 1 microVolt per metre, so a field of E across a dipole of L
+    metres gives E * L microVolt. Without this the electric channels
+    calibrate to dipole voltage rather than field.
+
+    :param component: component name ('ex' or 'ey')
+    :type component: str
+    :param dipole_length: dipole length in metres
+    :type dipole_length: float
+    :return: coefficient filter, milliVolt per kilometer to microVolt
+    :rtype: :class:`mt_metadata.timeseries.filters.CoefficientFilter`
+    """
+    dipole_filter = CoefficientFilter()
+    dipole_filter.name = f"lemi423_dipole_{component}_{dipole_length:.1f}m"
+    dipole_filter.units_in = "milliVolt per kilometer"
+    dipole_filter.units_out = "microVolt"
+    dipole_filter.gain = dipole_length
+    dipole_filter.comments = f"dipole length {dipole_length} m"
+    return dipole_filter
 
 
 # ---------- MTH5-facing reader ----------
@@ -322,7 +385,7 @@ class LEMI423Reader:
     """
     Read LEMI-423 binary files (*.B423) following MTH5 standard.
 
-    Stores RAW counts with calibrations as unapplied filters.
+    Stores raw counts and describes the hardware response as filters.
 
     :param files: Single file path or list of *.B423 files
     :type files: str, Path, or list
@@ -336,8 +399,8 @@ class LEMI423Reader:
         * **station_id** (str) - Station identifier (optional)
 
     **Filter Chain**:
-        - All channels: linear calibration (counts → nT or V)
-        - Magnetic (optional): LEMI-120 coil response (nT → mV)
+        - All channels: linear calibration (counts -> nT or V)
+        - Magnetic (optional): LEMI-120 coil response (nT -> mV)
     """
 
     def __init__(self, files: List[Union[str, Path]], **kwargs):
@@ -380,16 +443,16 @@ class LEMI423Reader:
     def start(self):
         """Start time of data collection"""
         if self._has_data():
-            return MTime(self.data.index[0])
+            return MTime(time_stamp=self.data.index[0])
         elif self.header:
-            return MTime(self.header.get("deployment_time"))
+            return MTime(time_stamp=self.header.get("deployment_time"))
         return None
 
     @property
     def end(self):
         """End time of data collection"""
         if self._has_data():
-            return MTime(self.data.index[-1])
+            return MTime(time_stamp=self.data.index[-1])
         return None
 
     @property
@@ -468,7 +531,7 @@ class LEMI423Reader:
         r.data_logger.model = "LEMI-423"
         r.data_logger.manufacturer = "LEMI"
         r.data_logger.type = "broadband"
-        r.data_type = "MTBB"  # Magnetotelluric Broadband
+        r.data_type = "BBMT"  # broadband MT
 
         if self.header:
             instrument_num = self.header.get("instrument_number", "")
@@ -650,7 +713,7 @@ class LEMI423Reader:
             ch_metadata = self._get_channel_metadata(code, ch_num)
 
             # **NEW**: Create calibration filter chain (following MTH5 standard)
-            # All channels get linear calibration filter (counts → physical units)
+            # All channels get linear calibration filter (counts -> physical units)
             # Magnetic channels optionally get LEMI-120 coil response if calibration_fn provided
             filters_list = []
 
@@ -672,11 +735,28 @@ class LEMI423Reader:
                     k_val = coeffs.get(k_key, 1.0)
                     a_val = coeffs.get(a_key, 0.0)
 
-                    # Create linear calibration filter (counts → nT or V)
-                    linear_filter = create_lemi423_linear_calibration_filter(
-                        code, k_val, a_val
+                    # ordered physical to recorded: dipole first on electric.
+                    # with no dipole length the channel stays a voltage rather
+                    # than being scaled by an invented 1 m
+                    if code in ("ex", "ey"):
+                        length = (
+                            self.dipole_length_ex
+                            if code == "ex"
+                            else self.dipole_length_ey
+                        )
+                        if length and length > 0:
+                            filters_list.append(
+                                create_lemi423_dipole_filter(code, length)
+                            )
+                        else:
+                            self.logger.warning(
+                                f"No dipole length for {code}, so it calibrates "
+                                "to electrode voltage, not field"
+                            )
+
+                    filters_list.append(
+                        create_lemi423_linear_calibration_filter(code, k_val, a_val)
                     )
-                    filters_list.append(linear_filter)
 
             # Add LEMI-120 coil response for magnetic channels (if provided)
             if code in ["hx", "hy", "hz"] and self.calibration_fn is not None:
@@ -697,9 +777,14 @@ class LEMI423Reader:
             if filters_list:
                 channel_response = ChannelResponse(filters_list=filters_list)
 
-                # Update metadata to reference all filters
-                ch_metadata.filter.name = [f.name for f in filters_list]
-                ch_metadata.filter.applied = [False] * len(filters_list)
+                # applied=True means the response is present in the data,
+                # which is what tells aurora to divide it back out
+                for stage, filter_obj in enumerate(filters_list, start=1):
+                    ch_metadata.add_filter(
+                        AppliedFilter(
+                            name=filter_obj.name, stage=stage, applied=True
+                        )
+                    )
 
             # Create ChannelTS object with channel_response
             ch = ChannelTS(
@@ -749,7 +834,7 @@ def read_lemi423(fn: Union[str, Path, List[Union[str, Path]]], **kwargs) -> RunT
     """
     Read LEMI-423 binary files (*.B423) and return RunTS.
 
-    Stores RAW counts with calibrations as unapplied filters (MTH5 standard).
+    Stores raw counts and describes the hardware response as filters.
 
     :param fn: Single file path or list of *.B423 files
     :type fn: str, Path, or list
@@ -797,7 +882,7 @@ def read_lemi423(fn: Union[str, Path, List[Union[str, Path]]], **kwargs) -> RunT
         ...     print(f"Coil filter: {run_ts.hx.channel_metadata.filter.name[0]}")
 
     .. note::
-        - LEMI-423 is a broadband MT instrument (data_type: "MTBB")
+        - LEMI-423 is a broadband MT instrument (data_type: "BBMT")
         - Files are concatenated by timestamp with duplicates removed
         - Gaps in data are preserved (not interpolated)
         - Linear calibration coefficients from file header are always applied

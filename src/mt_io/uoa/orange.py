@@ -1,77 +1,33 @@
+# -*- coding: utf-8 -*-
 """
-================================================================================
-Orange Box Magnetotelluric Reader for MTH5
-================================================================================
+==========
+Orange Box
+==========
 
-Reads binary magnetotelluric data from legacy University of Adelaide / Flinders
-University "Orange Box" long-period MT systems.
+    * reads University of Adelaide / Flinders Orange Box binary files
+    * builds the sensor and electrode response
 
-**IMPORTANT**: This reader is for the specific UoA/Flinders Orange Box configuration.
+The Orange Box is a legacy 8-channel long-period MT logger. Each file opens
+with a 40 byte ASCII header holding the sample count in hex, a 25 character
+timestamp and a 4 character filter point, then fixed 21 byte records: three
+24-bit channels, two 16-bit, one 8-bit, two more 24-bit, and a trailing byte.
+The sample rate is not stored directly, it follows from the filter point as
+10e6 / (512 * filter_point).
 
-The Orange Box is a custom-built 8-channel long-period MT data logger that
-records data in binary format with minimal header information.
+Channels map as ch0 to Bx, ch1 to Bz, ch2 to By, ch7 to Ex and ch6 to Ey.
+By, Ex and Ey are inverted by the hardware. Counts are unsigned about 2**23,
+so the reader stores them signed and the response is then a plain gain:
 
-**File Format**:
-    - Binary with ASCII header (3 lines)
-    - Header line 1: Sample rate (hex string, e.g., "00008CA0")
-    - Header line 2: Start date/time (ASCII, e.g., "Tue Jun 16 02:01:04 2009")
-    - Header line 3: Filter point (4-byte hex string, e.g., " 7A1")
-    - Binary data: 8 channels per sample, variable byte lengths
+    hx, hz   nT    -> count    2**23 / 70000
+    hy       nT    -> count   -2**23 / 70000
+    ex, ey   mV/km -> count   -2**23 * L / 100000
 
-**Channel Layout** (per sample, 18 bytes total):
-    - Channels 0-2 (Bx, Bz, By): 3 bytes each (24-bit unsigned, big-endian)
-    - Channels 3-4: 2 bytes each (16-bit unsigned, big-endian)
-    - Channel 5: 1 byte (8-bit unsigned)
-    - Channels 6-7 (Ey, Ex): 3 bytes each (24-bit unsigned, big-endian)
-    - 1 extra byte (padding/sync)
+Boxes built before the symmetric board was rebridged recorded +/-2.5 V, for
+which the electric full scale is 25000 rather than 100000.
 
-**Sensor Configuration** (Long-Period Only):
-    - Magnetic: Bartington Mag-03 fluxgates (or similar)
-      * Full-scale range: ±70,000 nT
-      * 24-bit ADC: ±2^23 counts
-    - Electric: Non-polarizing Pb-PbCl₂ electrodes
-      * Full-scale range: ±100,000 μV / dipole_length
-      * 24-bit ADC: ±2^23 counts
+@author: ben kay (ben@auscope.org.au)
 
-**Calibration Formulas** (from Legacy_LP_MT_Process.py):
-
-Magnetic channels (signed, inverted for By):
-    Bx [nT] = (chan0 / 2^23 - 1.0) × 70000.0
-    Bz [nT] = (chan1 / 2^23 - 1.0) × 70000.0
-    By [nT] = -((chan2 / 2^23 - 1.0) × 70000.0)  # Note: inverted
-
-Electric channels (signed, inverted, dipole-normalized):
-    Ex [μV/m] = -((chan7 / 2^23 - 1.0) × (100000.0 / dipole_length_ex))
-    Ey [μV/m] = -((chan6 / 2^23 - 1.0) × (100000.0 / dipole_length_ey))
-
-**MTH5 Standard Approach**:
-    - Store RAW counts (no calibration applied)
-    - Create CoefficientFilter objects for each calibration step
-    - Set filter.applied = False
-    - Matches Phoenix/Zen/NIMS/Metronix/LEMI-423/UoA-PR624 pattern
-
-**Example**:
-    >>> from mth5.io.uoa import read_orange
-    >>>
-    >>> # Read Orange Box data
-    >>> run_ts = read_orange(
-    ...     '/path/to/site/HFM1-*.BIN',
-    ...     station_id='ST61',
-    ...     dipole_length_ex=100.0,
-    ...     dipole_length_ey=100.0,
-    ...     latitude=-31.5,
-    ...     longitude=136.5,
-    ...     elevation=150.0
-    ... )
-
-**References**:
-    - Legacy Orange Box processing scripts (University of Adelaide)
-    - Flinders University MT deployment procedures
-    - ANSIR/AusLAMP long-period MT surveys
-
-Author: Claude Code (Anthropic) with A. Kelbert specifications
-Date: 2025-11-07
-License: MIT
+:license: MIT
 
 """
 
@@ -91,17 +47,17 @@ from mt_timeseries import ChannelTS, RunTS
 
 # ADC characteristics (24-bit sigma-delta, unsigned)
 ADC_BITS = 24
-ADC_MAX_COUNTS = 2**23  # Signed range: ±2^23
-ADC_ZERO = 2**23  # Zero point for unsigned → signed conversion
+ADC_MAX_COUNTS = 2**23  # Signed range: +/-2^23
+ADC_ZERO = 2**23  # Zero point for unsigned -> signed conversion
 
 # Bartington fluxgate full-scale range
-BARTINGTON_FULL_SCALE_NT = 70000.0  # ±70,000 nT
+BARTINGTON_FULL_SCALE_NT = 70000.0  # +/-70,000 nT
 
 # Electric field full-scale (before dipole normalization)
-ELECTRIC_FULL_SCALE_UV = 100000.0  # ±100,000 μV
+ELECTRIC_FULL_SCALE_UV = 100000.0  # +/-100,000 uV
 
 # Sample format constants
-BYTES_PER_SAMPLE = 18  # Total bytes per complete sample (8 channels + 1 extra)
+BYTES_PER_SAMPLE = 21  # 3+3+3+2+2+1+3+3 channel bytes plus 1 trailing byte
 NCHANNELS = 8
 
 
@@ -114,96 +70,65 @@ def create_orange_magnetic_filter(
     component: str, invert: bool = False
 ) -> CoefficientFilter:
     """
-    Create calibration filter for Orange Box magnetic channels.
+    Create the Bartington sensor filter for an Orange Box magnetic channel.
 
-    **Formula**: B [nT] = (counts / 2^23 - 1.0) × 70000.0
+    The sensor covers +/-70,000 nT over the full 24 bit swing, so one nT is
+    2**23 / 70000 counts. By is inverted by the hardware.
 
-    This is a two-step conversion:
-        1. Unsigned counts → signed normalized: (counts / 2^23 - 1.0) ∈ [-1, +1)
-        2. Normalized → nT: × 70000.0
-
-    :param component: Channel component (hx, hy, hz)
+    :param component: component name ('hx', 'hy' or 'hz')
     :type component: str
-    :param invert: Whether to invert the signal (True for By/hy)
+    :param invert: negate the gain, True for hy
     :type invert: bool
-    :return: Coefficient filter for magnetic calibration
-    :rtype: CoefficientFilter
-
-    **Why invert for By**: Legacy Orange Box hardware/orientation convention
-    requires By to be inverted for correct geomagnetic coordinate system.
+    :return: coefficient filter, nanoTesla to count
+    :rtype: :class:`mt_metadata.timeseries.filters.CoefficientFilter`
     """
     mag_filter = CoefficientFilter()
     mag_filter.name = f"orange_magnetic_{component}"
-    mag_filter.units_in = "count"
-    mag_filter.units_out = "nanotesla"
-
-    # Combined gain: (1 / 2^23) × 70000 × (±1 for invert)
-    gain = BARTINGTON_FULL_SCALE_NT / ADC_MAX_COUNTS
-    if invert:
-        gain = -gain
-
-    mag_filter.gain = gain
-    mag_filter.offset = (
-        -BARTINGTON_FULL_SCALE_NT if not invert else BARTINGTON_FULL_SCALE_NT
-    )
-
+    mag_filter.units_in = "nanoTesla"
+    mag_filter.units_out = "count"
+    gain = ADC_MAX_COUNTS / BARTINGTON_FULL_SCALE_NT
+    mag_filter.gain = -gain if invert else gain
     mag_filter.comments = (
-        f"Orange Box magnetic calibration: {component.upper()} = "
-        f"(counts / 2^23 - 1.0) × {BARTINGTON_FULL_SCALE_NT}"
+        f"Orange Box {component.upper()}, +/-{BARTINGTON_FULL_SCALE_NT:.0f} nT "
+        f"over +/-2**23 counts"
+        + (", inverted by the hardware" if invert else "")
     )
-    if invert:
-        mag_filter.comments += " [inverted]"
-
     return mag_filter
 
 
 def create_orange_electric_filter(
-    component: str, dipole_length: float
+    component: str, dipole_length: float, full_scale_uv: float = ELECTRIC_FULL_SCALE_UV
 ) -> CoefficientFilter:
     """
-    Create calibration filter for Orange Box electric channels.
+    Create the electrode filter for an Orange Box electric channel.
 
-    **Formula**: E [μV/m] = -((counts / 2^23 - 1.0) × (100000.0 / dipole_length))
+    1 mV/km is 1 microVolt per metre, so a field of E across a dipole of
+    length L metres gives E * L microVolt, which is E * L / full_scale of the
+    24 bit swing. Ex and Ey are inverted by the hardware.
 
-    Three-step conversion:
-        1. Unsigned counts → signed normalized: (counts / 2^23 - 1.0) ∈ [-1, +1)
-        2. Normalized → μV: × 100000.0
-        3. Dipole normalization & inversion: -(μV / dipole_length) → μV/m
-
-    :param component: Channel component (ex, ey)
+    :param component: component name ('ex' or 'ey')
     :type component: str
-    :param dipole_length: Dipole length in meters
+    :param dipole_length: dipole length in metres
     :type dipole_length: float
-    :return: Coefficient filter for electric calibration
-    :rtype: CoefficientFilter
-
-    **Why invert**: Legacy Orange Box convention inverts electric fields
-    for correct polarity in geomagnetic coordinate system.
+    :param full_scale_uv: electrode full scale, 100000 for +/-10 V boxes and
+     25000 for the earlier +/-2.5 V boxes
+    :type full_scale_uv: float
+    :return: coefficient filter, milliVolt per kilometer to count
+    :rtype: :class:`mt_metadata.timeseries.filters.CoefficientFilter`
     """
+    if dipole_length <= 0:
+        dipole_length = 1.0
+
     elec_filter = CoefficientFilter()
     elec_filter.name = f"orange_electric_{component}_{dipole_length}m"
-    elec_filter.units_in = "count"
-    elec_filter.units_out = "microvolt per meter"
-
-    # Combined gain: -(1 / 2^23) × (100000 / dipole_length)
-    gain = -(ELECTRIC_FULL_SCALE_UV / ADC_MAX_COUNTS) / dipole_length
-
-    elec_filter.gain = gain
-    elec_filter.offset = (
-        ELECTRIC_FULL_SCALE_UV / dipole_length
-    )  # Positive offset due to negative gain
-
+    elec_filter.units_in = "milliVolt per kilometer"
+    elec_filter.units_out = "count"
+    elec_filter.gain = -(ADC_MAX_COUNTS * dipole_length) / full_scale_uv
     elec_filter.comments = (
-        f"Orange Box electric calibration: {component.upper()} = "
-        f"-((count / 2^23 - 1.0) × (100000 / {dipole_length}))"
+        f"Orange Box {component.upper()}, {dipole_length} m dipole, "
+        f"+/-{full_scale_uv:.0f} uV full scale, inverted by the hardware"
     )
-
     return elec_filter
-
-
-# ==============================================================================
-# Binary File Reader
-# ==============================================================================
 
 
 class OrangeDataReader:
@@ -212,12 +137,10 @@ class OrangeDataReader:
 
     **Binary Format**:
         - 3 header lines (ASCII with \\n terminators)
-        - Binary data stream (18 bytes per sample)
+        - Binary data stream (21 bytes per sample)
 
-    **NEW APPROACH** (following MTH5 standard):
-        - Returns RAW counts (no calibration applied)
-        - Calibrations described as unapplied filters
-        - Matches Phoenix/Zen/NIMS/Metronix/LEMI-423/UoA-PR624 pattern
+        - Returns raw counts (no calibration applied)
+        - Hardware response described as filters
 
     :param file_path: Path to .BIN file
     :type file_path: Path or str
@@ -225,6 +148,7 @@ class OrangeDataReader:
 
     def __init__(self, file_path: Union[str, Path]):
         self.file_path = Path(file_path)
+        self.n_samples = None
         self.sample_rate = None
         self.start_time = None
         self.filter_point = None
@@ -240,16 +164,13 @@ class OrangeDataReader:
         :rtype: dict
 
         **Header Format**:
-            Line 1: " 00008CA0 \\n" (sample rate in hex with leading space)
-            Line 2: "Tue Jun 16 02:01:04 2009\\n"
-            Line 3: " 7A1" (filter point, 4 bytes hex)
-
-        **Why this format**: Legacy hardware wrote minimal ASCII headers
-        for human readability during field operations.
+            Line 1: " 00008CA0 " sample count in hex
+            Line 2: "Tue Jun 16 02:01:04 2009"
+            Line 3: " 7A1" filter point, sets the sample rate
         """
-        # Line 1: Sample rate (hex string)
+        # Line 1 is the number of samples in the file, not the rate
         line1 = f.readline().decode("ascii", errors="ignore").strip()
-        self.sample_rate = int(line1, 16)
+        self.n_samples = int(line1, 16)
 
         # Line 2: Date/time string
         line2 = f.readline().decode("ascii", errors="ignore").strip()
@@ -265,117 +186,81 @@ class OrangeDataReader:
         filter_bytes = f.read(4).decode("ascii", errors="ignore").strip()
         self.filter_point = int(filter_bytes, 16)
 
-        # Calculate actual sample rate from filter point
-        # samples_per_second = 10_000_000 / (512 * filter_point)
-        calculated_sr = 10_000_000 / (512 * self.filter_point)
+        # the logger derives its rate from the filter point
+        self.sample_rate = 10_000_000 / (512 * self.filter_point)
 
         return {
+            "n_samples": self.n_samples,
             "sample_rate": self.sample_rate,
             "start_time": self.start_time,
             "filter_point": self.filter_point,
-            "calculated_sample_rate": calculated_sr,
         }
 
     def read_samples(self, f) -> np.ndarray:
         """
-        Read all binary samples from file.
+        Read the binary samples, decoding the mixed channel widths.
 
-        :param f: Open binary file handle (positioned after header)
+        :param f: open binary file, positioned after the header
         :type f: file object
-        :return: Array of shape (n_samples, 8) with raw counts
-        :rtype: np.ndarray
+        :return: array of shape (n_samples, 8) of raw counts
+        :rtype: :class:`numpy.ndarray`
 
-        **Binary Layout** (18 bytes per sample, big-endian):
-            - Channels 0-2: 3 bytes each (24-bit unsigned)
-            - Channels 3-4: 2 bytes each (16-bit unsigned)
-            - Channel 5: 1 byte (8-bit unsigned)
-            - Channels 6-7: 3 bytes each (24-bit unsigned)
-            - 1 extra byte (padding/sync)
+        **Binary Layout** (21 bytes per sample, big endian):
+            - channels 0-2: 3 bytes each, 24 bit
+            - channels 3-4: 2 bytes each, 16 bit
+            - channel 5: 1 byte
+            - channels 6-7: 3 bytes each, 24 bit
+            - 1 trailing byte
 
-        **Why this layout**: Hardware ADC configuration with mixed
-        resolution channels for different sensor types.
+        A 25 character end timestamp follows the last record, so only
+        ``n_samples`` records are taken.
         """
-        samples = []
+        want = self.n_samples * BYTES_PER_SAMPLE if self.n_samples else -1
+        buf = f.read(want)
+        n = len(buf) // BYTES_PER_SAMPLE
+        if self.n_samples and n < self.n_samples:
+            self.logger.warning(
+                f"{self.file_path.name}: header claims {self.n_samples} samples, "
+                f"file holds {n}"
+            )
+        if n == 0:
+            return np.zeros((0, NCHANNELS), dtype=np.int64)
 
-        while True:
-            # Read channels 0-2 (3 bytes each, 24-bit)
-            counts = [0] * NCHANNELS
+        rec = (
+            np.frombuffer(buf[: n * BYTES_PER_SAMPLE], dtype=np.uint8)
+            .reshape(n, BYTES_PER_SAMPLE)
+            .astype(np.int64)
+        )
 
-            for i in range(3):
-                b1 = f.read(1)
-                b2 = f.read(1)
-                b3 = f.read(1)
-                if not b1 or not b2 or not b3:
-                    return (
-                        np.array(samples, dtype=np.int32)
-                        if samples
-                        else np.array([], dtype=np.int32).reshape(0, 8)
-                    )
-                counts[i] = (
-                    (int.from_bytes(b1, byteorder="big") << 16)
-                    | (int.from_bytes(b2, byteorder="big") << 8)
-                    | int.from_bytes(b3, byteorder="big")
-                )
+        def u24(o):
+            return (rec[:, o] << 16) | (rec[:, o + 1] << 8) | rec[:, o + 2]
 
-            # Read channels 3-4 (2 bytes each, 16-bit)
-            for i in range(3, 5):
-                b1 = f.read(1)
-                b2 = f.read(1)
-                if not b1 or not b2:
-                    return (
-                        np.array(samples, dtype=np.int32)
-                        if samples
-                        else np.array([], dtype=np.int32).reshape(0, 8)
-                    )
-                counts[i] = (int.from_bytes(b1, byteorder="big") << 8) | int.from_bytes(
-                    b2, byteorder="big"
-                )
+        def u16(o):
+            return (rec[:, o] << 8) | rec[:, o + 1]
 
-            # Read channel 5 (1 byte, 8-bit)
-            b1 = f.read(1)
-            if not b1:
-                return (
-                    np.array(samples, dtype=np.int32)
-                    if samples
-                    else np.array([], dtype=np.int32).reshape(0, 8)
-                )
-            counts[5] = int.from_bytes(b1, byteorder="big")
+        counts = np.empty((n, NCHANNELS), dtype=np.int64)
+        counts[:, 0] = u24(0)
+        counts[:, 1] = u24(3)
+        counts[:, 2] = u24(6)
+        counts[:, 3] = u16(9)
+        counts[:, 4] = u16(11)
+        counts[:, 5] = rec[:, 13]
+        counts[:, 6] = u24(14)
+        counts[:, 7] = u24(17)
 
-            # Read channels 6-7 (3 bytes each, 24-bit)
-            for i in range(6, 8):
-                b1 = f.read(1)
-                b2 = f.read(1)
-                b3 = f.read(1)
-                if not b1 or not b2 or not b3:
-                    return (
-                        np.array(samples, dtype=np.int32)
-                        if samples
-                        else np.array([], dtype=np.int32).reshape(0, 8)
-                    )
-                counts[i] = (
-                    (int.from_bytes(b1, byteorder="big") << 16)
-                    | (int.from_bytes(b2, byteorder="big") << 8)
-                    | int.from_bytes(b3, byteorder="big")
-                )
+        # the 24 bit channels are offset binary about 2**23; store them signed
+        # so the response is a plain gain and needs no offset term
+        for ch in (0, 1, 2, 6, 7):
+            counts[:, ch] -= ADC_ZERO
 
-            # Read extra byte (padding/sync)
-            extra = f.read(1)
-            if not extra:
-                return (
-                    np.array(samples, dtype=np.int32)
-                    if samples
-                    else np.array([], dtype=np.int32).reshape(0, 8)
-                )
-
-            samples.append(counts)
-
-        return np.array(samples, dtype=np.int32)
+        self.logger.info(f"Read {n} samples from {self.file_path.name}")
+        return counts
 
     def read(self) -> pd.DataFrame:
         """
-        Read Orange Box binary file and return RAW counts.
+        Read Orange Box binary file and return raw counts.
 
-        :return: DataFrame with columns [Bx, Bz, By, Ex, Ey] as RAW counts
+        :return: DataFrame with columns [Bx, Bz, By, Ex, Ey] as raw counts
         :rtype: pd.DataFrame
 
         **Note**: Only channels 0, 1, 2, 6, 7 are used (Bx, Bz, By, Ey, Ex).
@@ -389,7 +274,7 @@ class OrangeDataReader:
             self.logger.warning(f"No samples read from {self.file_path}")
             return pd.DataFrame(columns=["Bx", "Bz", "By", "Ex", "Ey"])
 
-        # Extract MT channels (RAW counts, no calibration)
+        # Extract MT channels (raw counts, no calibration)
         # Channel mapping: 0=Bx, 1=Bz, 2=By, 6=Ey, 7=Ex
         df = pd.DataFrame(
             {
@@ -414,10 +299,8 @@ class OrangeReader:
     """
     MTH5-compatible reader for Orange Box binary files.
 
-    **NEW APPROACH** (following MTH5 standard):
-        - Stores RAW counts in data arrays (no calibrations applied)
-        - Describes all calibrations as unapplied filters (filter.applied = False)
-        - Matches Phoenix/Zen/NIMS/Metronix/LEMI-423/UoA-PR624 pattern
+        - Stores raw counts in data arrays (no calibrations applied)
+        - Describes the hardware response as filters, applied=True
 
     :param files: Single file path or list of .BIN files to read
     :type files: str, Path, or list
@@ -433,7 +316,7 @@ class OrangeReader:
         * **elevation** (float) - Station elevation in meters
 
     :Example:
-        >>> from mth5.io.uoa import read_orange
+        >>> from mt_io.uoa import read_orange
         >>> run_ts = read_orange('/path/to/HFM1-*.BIN', station_id='ST61',
         ...                      dipole_length_ex=100.0, dipole_length_ey=100.0)
     """
@@ -525,10 +408,10 @@ class OrangeReader:
             channel_response = None
             if filters_list:
                 channel_response = ChannelResponse(filters_list=filters_list)
-                for sequence, filter_obj in enumerate(filters_list, start=1):
+                for stage, filter_obj in enumerate(filters_list, start=1):
                     ch_metadata.add_filter(
                         AppliedFilter(
-                            name=filter_obj.name, sequence=sequence, applied=False
+                            name=filter_obj.name, stage=stage, applied=True
                         )
                     )
 
@@ -567,7 +450,7 @@ class OrangeReader:
         r.data_logger.manufacturer = "University of Adelaide"
         r.data_logger.model = "Orange Box"
         r.data_logger.type = "long-period MT"
-        r.data_type = "MTLP"
+        r.data_type = "LPMT"
         r.time_period.start = self.start_time.isoformat() if self.start_time else ""
         return r
 
@@ -576,7 +459,7 @@ class OrangeReader:
         if component in ["hx", "hy", "hz"]:
             ch_metadata = Magnetic()
             ch_metadata.type = "magnetic"
-            ch_metadata.units = "counts"  # Store RAW counts (MTH5 standard)
+            ch_metadata.units = "count"
 
             azimuth_map = {"hx": 0, "hy": 90, "hz": 0}
             tilt_map = {"hx": 0, "hy": 0, "hz": 90}
@@ -589,7 +472,7 @@ class OrangeReader:
         else:
             ch_metadata = Electric()
             ch_metadata.type = "electric"
-            ch_metadata.units = "count"  # Store RAW counts (MTH5 standard)
+            ch_metadata.units = "count"
 
             azimuth_map = {"ex": 0, "ey": 90}
             ch_metadata.measurement_azimuth = azimuth_map.get(component, 0)
@@ -603,6 +486,8 @@ class OrangeReader:
         ch_metadata.component = component
         ch_metadata.channel_number = channel_number
         ch_metadata.sample_rate = self.sample_rate if self.sample_rate else 0.0
+        if self.start_time is not None:
+            ch_metadata.time_period.start = self.start_time.isoformat()
 
         return ch_metadata
 
@@ -635,7 +520,7 @@ def read_orange(data_path: Union[str, Path, List[Union[str, Path]]], **kwargs) -
         * **elevation** (float) - Station elevation in meters
 
     :Example:
-        >>> from mth5.io.uoa import read_orange
+        >>> from mt_io.uoa import read_orange
         >>> # Single file
         >>> run_ts = read_orange('HFM1-000.BIN', station_id='ST61')
         >>>

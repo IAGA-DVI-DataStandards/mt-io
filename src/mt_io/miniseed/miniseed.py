@@ -42,7 +42,11 @@ def read_miniseed(fn):
     # obspy does not use Path objects for file names
     if isinstance(fn, Path):
         fn = fn.as_posix()
-    obs_stream = obspy_read(fn)
+    try:
+        obs_stream = obspy_read(fn, format="MSEED")
+    except Exception:
+        # not actually miniSEED; let obspy work the format out
+        obs_stream = obspy_read(fn)
     run_obj = RunTS()
     run_obj.from_obspy_stream(obs_stream)
 
