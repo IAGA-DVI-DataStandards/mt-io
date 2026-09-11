@@ -69,8 +69,29 @@ BZ_DIVIDER_RATIO = BZ_DIVIDER_R_BOTTOM / (BZ_DIVIDER_R_TOP + BZ_DIVIDER_R_BOTTOM
 
 # Rates the PR6-24 can be set to, EDM 021 1.3
 EDL_SAMPLE_RATES = (
-    1, 2, 4, 5, 10, 20, 25, 40, 50, 75, 100, 120, 125, 150,
-    200, 250, 300, 375, 500, 600, 750, 1000, 3000,
+    1,
+    2,
+    4,
+    5,
+    10,
+    20,
+    25,
+    40,
+    50,
+    75,
+    100,
+    120,
+    125,
+    150,
+    200,
+    250,
+    300,
+    375,
+    500,
+    600,
+    750,
+    1000,
+    3000,
 )
 
 # Standard field layout: ex north, ey east. Anything else is
@@ -550,9 +571,7 @@ def infer_sample_rate(
     return float(rate)
 
 
-def decimate_series(
-    data: np.ndarray, factor: int, max_stage: int = 8
-) -> np.ndarray:
+def decimate_series(data: np.ndarray, factor: int, max_stage: int = 8) -> np.ndarray:
     """
     Decimate one channel with anti-alias filtering.
 
@@ -616,9 +635,7 @@ class UoADataReader:
         >>> print(f"Read {len(data)} samples")
     """
 
-    def __init__(
-        self, channel: str, data_path, station_prefix: Optional[str] = None
-    ):
+    def __init__(self, channel: str, data_path, station_prefix: Optional[str] = None):
         self.channel = channel.upper()
         # a list comes from a collection, already grouped into runs
         if isinstance(data_path, (list, tuple, set)):
@@ -664,20 +681,20 @@ class UoADataReader:
             return []
 
         if self.data_path.is_dir():
-            found = [f for f in self.data_path.glob(f"**/*.{self.channel}")
-                     if not f.name.startswith("._")]
+            found = [
+                f
+                for f in self.data_path.glob(f"**/*.{self.channel}")
+                if not f.name.startswith("._")
+            ]
             if found and self.station_prefix:
                 want = self.station_prefix.rstrip("_-").lower()
                 matched = [
-                    f for f in found
-                    if (parse_edl_station(f) or "").lower() == want
+                    f for f in found if (parse_edl_station(f) or "").lower() == want
                 ]
                 if matched:
                     found = matched
                 else:
-                    seen = sorted(
-                        {parse_edl_station(f) or "?" for f in found}
-                    )
+                    seen = sorted({parse_edl_station(f) or "?" for f in found})
                     self.logger.warning(
                         f"No {self.channel} files for station "
                         f"{self.station_prefix.rstrip('_-')}; using all "
@@ -1115,9 +1132,7 @@ class UoAReader:
                     # applied=True means the response is present in the data,
                     # which is what tells aurora to divide it back out
                     ch_metadata.add_filter(
-                        AppliedFilter(
-                            name=filter_obj.name, stage=stage, applied=True
-                        )
+                        AppliedFilter(name=filter_obj.name, stage=stage, applied=True)
                     )
 
             # Create ChannelTS object with RAW data (microVolt)
@@ -1223,9 +1238,7 @@ class UoAReader:
             dipole_length = 1.0
 
         azimuth = self.ex_azimuth if component == "ex" else self.ey_azimuth
-        filters.append(
-            create_dipole_length_filter(component, dipole_length, azimuth)
-        )
+        filters.append(create_dipole_length_filter(component, dipole_length, azimuth))
         filters.append(create_efield_gain_filter(self.efield_gain))
 
         return ChannelResponse(filters_list=filters)

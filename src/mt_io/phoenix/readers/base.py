@@ -42,6 +42,7 @@ def _cached_receiver_metadata(path) -> PhoenixReceiverMetadata:
         _RECEIVER_METADATA_CACHE[key] = obj
     return obj
 
+
 # =============================================================================
 
 

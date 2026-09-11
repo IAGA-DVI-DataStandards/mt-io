@@ -90,8 +90,7 @@ def create_orange_magnetic_filter(
     mag_filter.gain = -gain if invert else gain
     mag_filter.comments = (
         f"Orange Box {component.upper()}, +/-{BARTINGTON_FULL_SCALE_NT:.0f} nT "
-        f"over +/-2**23 counts"
-        + (", inverted by the hardware" if invert else "")
+        f"over +/-2**23 counts" + (", inverted by the hardware" if invert else "")
     )
     return mag_filter
 
@@ -410,9 +409,7 @@ class OrangeReader:
                 channel_response = ChannelResponse(filters_list=filters_list)
                 for stage, filter_obj in enumerate(filters_list, start=1):
                     ch_metadata.add_filter(
-                        AppliedFilter(
-                            name=filter_obj.name, stage=stage, applied=True
-                        )
+                        AppliedFilter(name=filter_obj.name, stage=stage, applied=True)
                     )
 
             # Create ChannelTS object

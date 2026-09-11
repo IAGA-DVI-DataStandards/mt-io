@@ -1041,9 +1041,7 @@ class TestLEMI424BugFixes:
         assert lemi_obj._has_data()
 
         # Verify that first and last lines are the same (as expected for single line)
-        assert (
-            len(lemi_obj.data) == 2
-        )  # first_line + last_line (same line duplicated)
+        assert len(lemi_obj.data) == 2  # first_line + last_line (same line duplicated)
 
 
 class TestFixtureValidation:

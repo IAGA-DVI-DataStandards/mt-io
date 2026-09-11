@@ -16,7 +16,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from mt_io.uoa import UoACollection, read_uoa
+from mt_io.uoa import read_uoa, UoACollection
 from mt_io.uoa.pr624 import count_samples
 
 # =============================================================================
@@ -73,9 +73,7 @@ class TestRunSplitting(unittest.TestCase):
         self.assertEqual(self.df.run.nunique(), 2)
 
     def test_run_names_carry_the_sample_rate(self):
-        self.assertEqual(
-            sorted(self.df.run.unique()), ["sr10_0001", "sr10_0002"]
-        )
+        self.assertEqual(sorted(self.df.run.unique()), ["sr10_0001", "sr10_0002"])
 
     def test_first_run_holds_three_stamps(self):
         first = self.df[self.df.run == "sr10_0001"]
@@ -90,7 +88,8 @@ class TestRunSplitting(unittest.TestCase):
         other = Path(tempfile.mkdtemp())
         try:
             write_edl_files(
-                other, "TEST02",
+                other,
+                "TEST02",
                 ["240101000000", "240101000006", "240101000012"],
             )
             collection = UoACollection(other)
@@ -196,7 +195,8 @@ class TestRunBoundaries(unittest.TestCase):
     def test_a_gap_in_one_channel_ends_the_run_for_all(self):
         """Test that a channel missing a file splits every channel"""
         write_edl_files(
-            self.path, "TEST01",
+            self.path,
+            "TEST01",
             ["240101000000", "240101000006", "240101000012"],
         )
         # only ex loses its middle file, so only ex has a gap. The others run
@@ -227,7 +227,9 @@ class TestStationNaming(unittest.TestCase):
     def _stations(self):
         collection = UoACollection(self.path)
         collection.sample_rate = SAMPLE_RATE
-        return sorted(collection.to_dataframe(sample_rates=[SAMPLE_RATE]).station.unique())
+        return sorted(
+            collection.to_dataframe(sample_rates=[SAMPLE_RATE]).station.unique()
+        )
 
     def test_with_an_underscore(self):
         write_edl_files(self.path, "TEST01", ["240101000000", "240101000006"])
@@ -288,8 +290,11 @@ class TestPartialChannelSets(unittest.TestCase):
             for channel in channels:
                 (self.path / f"TEST01_{stamp}.{channel}").write_text(body)
         return read_uoa(
-            self.path, station_id="TEST01", sample_rate=SAMPLE_RATE,
-            dipole_length_ex=50.0, dipole_length_ey=50.0,
+            self.path,
+            station_id="TEST01",
+            sample_rate=SAMPLE_RATE,
+            dipole_length_ex=50.0,
+            dipole_length_ey=50.0,
         )
 
     def test_no_bz(self):
@@ -344,8 +349,11 @@ class TestReadFromFileList(unittest.TestCase):
     def test_reads_a_list_of_files(self):
         files = sorted(self.path.glob("TEST01_*"))
         run_ts = read_uoa(
-            files, station_id="TEST01", sample_rate=SAMPLE_RATE,
-            dipole_length_ex=50.0, dipole_length_ey=50.0,
+            files,
+            station_id="TEST01",
+            sample_rate=SAMPLE_RATE,
+            dipole_length_ex=50.0,
+            dipole_length_ey=50.0,
         )
         self.assertEqual(sorted(run_ts.channels), ["ex", "ey", "hx", "hy", "hz"])
         self.assertEqual(run_ts.dataset.sizes["time"], 2 * N_SAMPLES)
@@ -354,8 +362,11 @@ class TestReadFromFileList(unittest.TestCase):
         """Test that only the files given are read"""
         files = sorted(self.path.glob("TEST01_240101000000.*"))
         run_ts = read_uoa(
-            files, station_id="TEST01", sample_rate=SAMPLE_RATE,
-            dipole_length_ex=50.0, dipole_length_ey=50.0,
+            files,
+            station_id="TEST01",
+            sample_rate=SAMPLE_RATE,
+            dipole_length_ex=50.0,
+            dipole_length_ey=50.0,
         )
         self.assertEqual(run_ts.dataset.sizes["time"], N_SAMPLES)
 

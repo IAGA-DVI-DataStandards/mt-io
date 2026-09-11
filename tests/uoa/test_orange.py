@@ -31,8 +31,26 @@ START_STRING = "Tue Jun 16 02:01:04 2009"
 
 # raw value per channel. The 24 bit channels are offset binary about ADC_ZERO.
 SAMPLES = [
-    [ADC_ZERO + 100, ADC_ZERO - 50, ADC_ZERO + 7, 1234, 4321, 9, ADC_ZERO + 11, ADC_ZERO - 3],
-    [ADC_ZERO + 200, ADC_ZERO - 60, ADC_ZERO + 8, 1235, 4322, 10, ADC_ZERO + 12, ADC_ZERO - 4],
+    [
+        ADC_ZERO + 100,
+        ADC_ZERO - 50,
+        ADC_ZERO + 7,
+        1234,
+        4321,
+        9,
+        ADC_ZERO + 11,
+        ADC_ZERO - 3,
+    ],
+    [
+        ADC_ZERO + 200,
+        ADC_ZERO - 60,
+        ADC_ZERO + 8,
+        1235,
+        4322,
+        10,
+        ADC_ZERO + 12,
+        ADC_ZERO - 4,
+    ],
     [ADC_ZERO, ADC_ZERO, ADC_ZERO, 0, 0, 0, ADC_ZERO, ADC_ZERO],
 ]
 

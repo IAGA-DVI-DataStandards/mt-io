@@ -266,11 +266,11 @@ class Read_Lemi_Data:
         size = Path(self.binary_file).stat().st_size
         n_samples = max(0, (size - 1024) // record.itemsize)
         if n_samples == 0:
-            return {"n_samples": 0, "start": None, "end": None,
-                    "sample_rate": None}
+            return {"n_samples": 0, "start": None, "end": None, "sample_rate": None}
 
-        arr = np.memmap(self.binary_file, dtype=record, mode="r",
-                        offset=1024, shape=(n_samples,))
+        arr = np.memmap(
+            self.binary_file, dtype=record, mode="r", offset=1024, shape=(n_samples,)
+        )
         ticks = np.asarray(arr["tick"], dtype=np.int64)
         stamps = np.asarray(arr["time"], dtype=np.int64) * 1000 + ticks
 
@@ -344,7 +344,9 @@ def create_lemi423_linear_calibration_filter(
 
     coeff_filter = CoefficientFilter()
     coeff_filter.name = f"lemi423_linear_{component}"
-    coeff_filter.units_in = "nanoTesla" if component in ("hx", "hy", "hz") else "microVolt"
+    coeff_filter.units_in = (
+        "nanoTesla" if component in ("hx", "hy", "hz") else "microVolt"
+    )
     coeff_filter.units_out = "count"
     coeff_filter.gain = 1.0 / k_coeff
     coeff_filter.comments = (
@@ -781,9 +783,7 @@ class LEMI423Reader:
                 # which is what tells aurora to divide it back out
                 for stage, filter_obj in enumerate(filters_list, start=1):
                     ch_metadata.add_filter(
-                        AppliedFilter(
-                            name=filter_obj.name, stage=stage, applied=True
-                        )
+                        AppliedFilter(name=filter_obj.name, stage=stage, applied=True)
                     )
 
             # Create ChannelTS object with channel_response

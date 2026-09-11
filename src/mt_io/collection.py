@@ -140,9 +140,7 @@ class Collection:
         # directory (rglob "*"), letting callers filter as needed.
         if extension == "":
             fn_list = list(self.file_path.rglob("*"))
-            return sorted(
-                [p for p in fn_list if p.is_file() and not _is_sidecar(p)]
-            )
+            return sorted([p for p in fn_list if p.is_file() and not _is_sidecar(p)])
 
         # If a list/tuple was passed, expand each provided extension to
         # include lower/upper forms so searches are case-insensitive.

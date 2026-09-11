@@ -619,26 +619,30 @@ class LEMI424:
                     delimiter=r"\s+",
                     names=names,
                     dtype={k: v for k, v in self.dtypes.items() if k in names},
-                    usecols=tuple(c for c in (
-                        "bx",
-                        "by",
-                        "bz",
-                        "temperature_e",
-                        "temperature_h",
-                        "e1",
-                        "e2",
-                        "e3",
-                        "e4",
-                        "battery",
-                        "elevation",
-                        "latitude",
-                        "lat_hemisphere",
-                        "longitude",
-                        "lon_hemisphere",
-                        "n_satellites",
-                        "gps_fix",
-                        "time_diff",
-                    ) if c in names),
+                    usecols=tuple(
+                        c
+                        for c in (
+                            "bx",
+                            "by",
+                            "bz",
+                            "temperature_e",
+                            "temperature_h",
+                            "e1",
+                            "e2",
+                            "e3",
+                            "e4",
+                            "battery",
+                            "elevation",
+                            "latitude",
+                            "lat_hemisphere",
+                            "longitude",
+                            "lon_hemisphere",
+                            "n_satellites",
+                            "gps_fix",
+                            "time_diff",
+                        )
+                        if c in names
+                    ),
                 )
                 data = lemi_parse_position_columns(data)
                 time_index = pd.date_range(

@@ -226,7 +226,6 @@ class UoACollection(Collection):
         self._warn_duplicate_starts(df)
         return self._sort_df(df, run_name_zeros)
 
-
     def _warn_duplicate_starts(self, df: pd.DataFrame) -> None:
         """
         Warn when a channel has two files claiming the same start.
