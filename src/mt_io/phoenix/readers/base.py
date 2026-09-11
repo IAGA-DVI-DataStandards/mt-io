@@ -24,7 +24,7 @@ from mt_metadata.timeseries.filters import ChannelResponse, CoefficientFilter
 from .calibrations import PhoenixCalibration
 from .config import PhoenixConfig
 from .header import Header
-from .receiver_metadata import PhoenixReceiverMetadata, find_receiver_metadata
+from .receiver_metadata import find_receiver_metadata, PhoenixReceiverMetadata
 
 # every data file of a station shares one recmeta.json; parse it once and
 # refresh when the file changes

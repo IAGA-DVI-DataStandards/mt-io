@@ -18,8 +18,8 @@ from pathlib import Path
 import pytest
 
 from mt_io.phoenix.readers.receiver_metadata import (
-    RECEIVER_METADATA_NAMES,
     find_receiver_metadata,
+    RECEIVER_METADATA_NAMES,
 )
 
 # =============================================================================
