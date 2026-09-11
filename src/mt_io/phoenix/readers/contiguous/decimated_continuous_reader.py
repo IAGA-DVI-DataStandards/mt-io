@@ -180,16 +180,19 @@ class DecimatedContinuousReader(TSReaderBase):
         np.ndarray
             Data within the given sequence range as float32 array
         """
-        data = np.array([], dtype=np.float32)
+        # join once at the end; np.append per file copies the whole array
+        # every time. The empty seed keeps the dtype promotion of the old
+        # per-file appends.
+        chunks = [np.array([], dtype=np.float32)]
         for ii, fn in enumerate(self.sequence_list[slice(start, end)], start):
             self._open_file(fn)
             if self.stream is not None:
                 self.unpack_header(self.stream)
             if ii == start:
                 self.sequence_start = self.segment_start_time
-            ts = self.read()
-            data = np.append(data, ts)
+            chunks.append(self.read())
             self.seq = ii
+        data = np.concatenate(chunks)
         self.logger.debug(f"Read {self.seq + 1} sequences")
         self.data_size = data.size
         return data
