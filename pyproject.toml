@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mt-io"
-version = "0.0.4"
+version = "0.0.5"
 description = "Readers for various magnetotelluric data file types from various data loggers"
 authors = [
     {name = "Jared Peacock", email = "jpeacock@usgs.gov"},
@@ -113,7 +113,7 @@ use_parentheses = true
 ensure_newline_before_comments = true
 
 [tool.bumpversion]
-current_version = "0.0.4"
+current_version = "0.0.5"
 commit = true
 tag = true
 
