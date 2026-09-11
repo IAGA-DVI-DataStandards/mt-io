@@ -2,7 +2,7 @@
 
 [![PyPI Version](https://img.shields.io/pypi/v/mt-io.svg)](https://pypi.python.org/pypi/mt-io)
 
-**Version**: 0.0.4
+**Version**: 0.0.5
 
 This package is meant to be a repository for readers for various magnetotelluric data file types from various data loggers including:
 

@@ -24,7 +24,24 @@ from mt_metadata.timeseries.filters import ChannelResponse, CoefficientFilter
 from .calibrations import PhoenixCalibration
 from .config import PhoenixConfig
 from .header import Header
-from .receiver_metadata import PhoenixReceiverMetadata
+from .receiver_metadata import find_receiver_metadata, PhoenixReceiverMetadata
+
+# every data file of a station shares one recmeta.json; parse it once and
+# refresh when the file changes
+_RECEIVER_METADATA_CACHE: dict = {}
+
+
+def _cached_receiver_metadata(path) -> PhoenixReceiverMetadata:
+    key = (str(path), Path(path).stat().st_mtime_ns)
+    obj = _RECEIVER_METADATA_CACHE.get(key)
+    if obj is None:
+        obj = PhoenixReceiverMetadata(path)
+        stale = [k for k in _RECEIVER_METADATA_CACHE if k[0] == key[0]]
+        for k in stale:
+            del _RECEIVER_METADATA_CACHE[k]
+        _RECEIVER_METADATA_CACHE[key] = obj
+    return obj
+
 
 # =============================================================================
 
@@ -259,16 +276,19 @@ class TSReaderBase(Header):
     @property
     def recmeta_file_path(self) -> Path | None:
         """
-        Path to the recmeta.json file.
+        Path to the receiver metadata file.
+
+        EMpower's empower_recmeta.json is taken over recmeta.json where it is
+        present, because it holds any correction made after the survey.
 
         Returns
         -------
         Path or None
-            Path to recmeta file if it exists, None otherwise
+            Path to receiver metadata file if it exists, None otherwise
         """
         if self.base_path is not None:
-            recmeta_fn = self.base_path.parent.parent.joinpath("recmeta.json")
-            if recmeta_fn.exists():
+            recmeta_fn = find_receiver_metadata(self.base_path.parent.parent)
+            if recmeta_fn is not None:
                 return recmeta_fn
             else:
                 self.logger.warning("Could not find recmeta file")
@@ -361,7 +381,7 @@ class TSReaderBase(Header):
         Read recmeta.json into an object and store in rx_metadata attribute.
         """
         if self.recmeta_file_path is not None and self.rx_metadata is None:
-            self.rx_metadata = PhoenixReceiverMetadata(self.recmeta_file_path)
+            self.rx_metadata = _cached_receiver_metadata(self.recmeta_file_path)
 
     def get_lowpass_filter_name(self) -> str | None:
         """

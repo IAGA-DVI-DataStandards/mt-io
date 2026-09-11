@@ -199,11 +199,11 @@ class TestPR624Reader(unittest.TestCase):
         # Should have at least one filter (the calibration filter)
         self.assertGreater(len(self.run_ts.hx.channel_metadata.filters), 0)
 
-    def test_filters_not_applied(self):
-        """Test that filters are marked as not applied"""
-        # All filters should have applied=False
+    def test_filters_applied(self):
+        """Test that filters are marked as applied"""
+        # the responses are in the recorded data, so every stage says so
         for filt in self.run_ts.hx.channel_metadata.filters:
-            self.assertFalse(filt.applied)
+            self.assertTrue(filt.applied)
 
 
 class TestPR624ReaderWithLEMI120(unittest.TestCase):

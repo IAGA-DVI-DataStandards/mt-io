@@ -644,7 +644,8 @@ class TestLEMI424MetadataOnlyOperations:
         """Test properties with metadata-only read."""
         assert lemi_obj_metadata_only.start.isoformat() == "2020-10-04T00:00:00+00:00"
         assert lemi_obj_metadata_only.end.isoformat() == "2020-10-04T00:00:59+00:00"
-        assert lemi_obj_metadata_only.n_samples == 2  # Only first and last line
+        # the frame holds two rows, the count still describes the file
+        assert lemi_obj_metadata_only.n_samples == 60
 
         # These should still work with 2 data points
         assert isinstance(lemi_obj_metadata_only.latitude, float)
@@ -1031,18 +1032,16 @@ class TestLEMI424BugFixes:
         """
         single_line_data = "2020 10 04 00 00 00 23772.512 238.148 41845.187 33.88 25.87 142.134 -45.060 213.787 8.224 12.78 2199.0 3404.83963 N 10712.84474 W 12 2 0"
 
-        # Use mock to simulate single line file content but use real file path
-        with patch("builtins.open", mock_open(read_data=single_line_data)):
-            lemi_obj = LEMI424(lemi_test_file)
+        single_line_file = lemi_test_file.parent / "single_line.txt"
+        single_line_file.write_text(single_line_data + "\n")
+        lemi_obj = LEMI424(single_line_file)
 
-            # This should not raise UnboundLocalError anymore
-            lemi_obj.read_metadata()
-            assert lemi_obj._has_data()
+        # This should not raise UnboundLocalError anymore
+        lemi_obj.read_metadata()
+        assert lemi_obj._has_data()
 
-            # Verify that first and last lines are the same (as expected for single line)
-            assert (
-                len(lemi_obj.data) == 2
-            )  # first_line + last_line (same line duplicated)
+        # Verify that first and last lines are the same (as expected for single line)
+        assert len(lemi_obj.data) == 2  # first_line + last_line (same line duplicated)
 
 
 class TestFixtureValidation:

@@ -19,6 +19,21 @@ from loguru import logger
 # =============================================================================
 
 
+def _is_sidecar(path):
+    """
+    True for an AppleDouble "._name" sidecar, which is not data.
+
+    :param path: path to check
+    :type path: :class:`pathlib.Path`
+    :return: whether the file is a sidecar
+    :rtype: bool
+    """
+    return path.name.startswith("._")
+
+
+# =============================================================================
+
+
 class Collection:
     """
     A general collection class to keep track of files with methods to create
@@ -105,6 +120,10 @@ class Collection:
         Get files with given extension. Uses Pathlib.Path.rglob, so it finds
         all files within the `file_path` by searching all sub-directories.
 
+        AppleDouble "._name" sidecars are skipped. An archive packed on a Mac
+        carries one beside every file, sharing its extension but holding
+        resource fork bytes.
+
         :param extension: file extension(s)
         :type extension: string or list
         :return: list of files in the `file_path` with the given extensions
@@ -121,7 +140,7 @@ class Collection:
         # directory (rglob "*"), letting callers filter as needed.
         if extension == "":
             fn_list = list(self.file_path.rglob("*"))
-            return sorted([p for p in fn_list if p.is_file()])
+            return sorted([p for p in fn_list if p.is_file() and not _is_sidecar(p)])
 
         # If a list/tuple was passed, expand each provided extension to
         # include lower/upper forms so searches are case-insensitive.
@@ -145,7 +164,7 @@ class Collection:
             if not ext:
                 continue
             for p in self.file_path.rglob(f"*.{ext}"):
-                if p.is_file() and p not in seen:
+                if p.is_file() and p not in seen and not _is_sidecar(p):
                     seen.add(p)
                     fn_list.append(p)
 
@@ -219,8 +238,11 @@ class Collection:
 
         """
 
-        df.start = pd.to_datetime(df.start, errors="coerce")
-        df.end = pd.to_datetime(df.end, errors="coerce")
+        # ISO8601 rather than inferred: the format is taken from the first
+        # value otherwise, and a sub-second time in a whole second column
+        # silently becomes NaT
+        df.start = pd.to_datetime(df.start, errors="coerce", format="ISO8601")
+        df.end = pd.to_datetime(df.end, errors="coerce", format="ISO8601")
         df.instrument_id = df.instrument_id.astype(str)
         df.calibration_fn = df.calibration_fn.astype(str)
 

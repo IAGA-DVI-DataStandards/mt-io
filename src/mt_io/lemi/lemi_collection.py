@@ -21,7 +21,8 @@ from typing import List
 import pandas as pd
 
 from mt_io.collection import Collection
-from mt_io.lemi import LEMI417, LEMI423Reader, LEMI424
+from mt_io.lemi import LEMI417, LEMI424
+from mt_io.lemi.lemi423 import Read_Lemi_Data, Read_Lemi_Header
 
 # =============================================================================
 
@@ -128,6 +129,8 @@ class LEMICollection(Collection):
 
         self.station_id = "mt001"
         self.survey_id = "mt"
+        self.dipole_length_ex = 0.0
+        self.dipole_length_ey = 0.0
         self.calibration_dict = {}
 
     def get_calibrations(self, calibration_path: str | Path) -> dict:
@@ -250,16 +253,14 @@ class LEMICollection(Collection):
                 components = ",".join(lemi_obj.run_metadata.channels_recorded_all)
 
             elif fn_path.suffix.lower() in [".b423"]:
-                # LEMI-423 reader - read header only for metadata
-                lemi_obj = LEMI423Reader([fn])
-                # Read header to get metadata without loading full data
-                df, hdr = lemi_obj._read_one(fn_path)
-                lemi_obj.header = hdr
-                lemi_obj.data = df
+                # LEMI-423: the records are fixed width, so the summary comes
+                # from the header and the first and last records rather than
+                # parsing the whole file
+                hdr = Read_Lemi_Header(fn_path).read()
+                summary = Read_Lemi_Data(fn_path, hdr["coefficients"]).read_summary()
 
-                # Use sample rate from header (auto-detected from tick counter in _read_one)
                 # LEMI-423 supports: 4000, 2000, 1000, 500, 250 Hz
-                sample_rate = hdr.get("sample_rate", None)
+                sample_rate = summary["sample_rate"]
 
                 # Skip file if sample rate couldn't be detected
                 if sample_rate is None:
@@ -269,10 +270,10 @@ class LEMICollection(Collection):
                     continue
 
                 instrument_id = f"LEMI-423 #{hdr.get('instrument_number', '')}"
-                n_samples = len(df)
+                n_samples = summary["n_samples"]
                 file_size = fn_path.stat().st_size
-                start = df.index[0].isoformat() if len(df) > 0 else None
-                end = df.index[-1].isoformat() if len(df) > 0 else None
+                start = summary["start"].isoformat() if n_samples else None
+                end = summary["end"].isoformat() if n_samples else None
                 components = "hx,hy,hz,ex,ey"  # LEMI-423 always has 5 channels
 
             elif fn_path.suffix.lower().startswith(".b"):
@@ -312,6 +313,7 @@ class LEMICollection(Collection):
             entry["file_size"] = file_size
             entry["n_samples"] = n_samples
             entry["instrument_id"] = instrument_id
+            entry["dipole"] = [self.dipole_length_ex, self.dipole_length_ey]
 
             entries.append(entry)
 

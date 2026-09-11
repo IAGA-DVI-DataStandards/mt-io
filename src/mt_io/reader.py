@@ -58,7 +58,16 @@ from typing import Any, Callable
 
 from loguru import logger
 
-from mt_io import lemi, metronix, miniseed, nims, phoenix, usgs_ascii, zen
+from mt_io import (
+    lemi,
+    metronix,
+    miniseed,
+    nims,
+    phoenix,
+    uoa,
+    usgs_ascii,
+    zen,
+)
 
 # =============================================================================
 # Reader registry for MT data formats
@@ -78,6 +87,10 @@ readers: dict[str, dict[str, Any]] = {
         "file_types": ["txt"],
         "reader": lemi.read_lemi424,
     },
+    "lemi423": {
+        "file_types": ["b423"],
+        "reader": lemi.read_lemi423,
+    },
     "phoenix": {
         "file_types": ["bin", "td_30", "td_150", "td_24k"],
         "reader": phoenix.read_phoenix,
@@ -85,6 +98,15 @@ readers: dict[str, dict[str, Any]] = {
     "metronix": {
         "file_types": ["atss"],
         "reader": metronix.read_atss,
+    },
+    "uoa_orange": {
+        "file_types": ["bin"],
+        "reader": uoa.read_orange,
+    },
+    # the PR6-24 writes one file per channel, so pass the run's files as a list
+    "uoa_pr624": {
+        "file_types": ["bx", "by", "bz", "ex", "ey"],
+        "reader": uoa.read_uoa,
     },
 }
 
@@ -233,10 +255,14 @@ def read_file(
     - usgs_ascii: .asc, .zip (USGS ASCII format)
     - miniseed: .miniseed, .ms, .mseed (miniSEED format)
     - lemi424: .txt (LEMI-424 format)
+    - lemi423: .b423 (LEMI-423 format)
     - phoenix: .bin, .td_30, .td_150, .td_24k (Phoenix formats)
     - metronix: .atss (Metronix ADU format)
+    - uoa_orange: .bin (Orange Box format)
+    - uoa_pr624: .bx, .by, .bz, .ex, .ey (Earth Data PR6-24 format)
 
-    For ambiguous extensions like .bin, specify file_type explicitly.
+    For ambiguous extensions like .bin, specify file_type explicitly. The
+    PR6-24 writes one file per channel, so pass the files of a run as a list.
     """
 
     if isinstance(fn, (list, tuple)):
@@ -266,5 +292,9 @@ def read_file(
             logger.error(msg)
             raise KeyError(msg)
     else:
-        file_type, file_reader = get_reader(file_ext)
+        # .bin is nims, phoenix or Orange Box, and only the file itself says
+        # which, so hand it over for sniffing
+        file_type, file_reader = get_reader(
+            file_ext, fn[0] if isinstance(fn, list) else fn
+        )
     return file_reader(fn, **kwargs)

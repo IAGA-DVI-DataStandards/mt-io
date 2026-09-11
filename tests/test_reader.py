@@ -133,8 +133,9 @@ class TestReadFileBasic:
         # Call function
         result = read_file("/path/test.z3d")
 
-        # Verify calls
-        mock_get_reader.assert_called_once_with("z3d")
+        # Verify calls. The file goes with the extension so an ambiguous
+        # one like .bin can be sniffed.
+        mock_get_reader.assert_called_once_with("z3d", mock_path_instance)
         mock_reader_func.assert_called_once_with(mock_path_instance)
         assert result == "test_data"
 
@@ -198,8 +199,9 @@ class TestReadFileListInput:
         ]
         result = read_file(file_list)
 
-        # Should call get_reader once and reader with all paths
-        mock_get_reader.assert_called_once_with("z3d")
+        # Should call get_reader once, with the first file, and the reader
+        # with all paths
+        mock_get_reader.assert_called_once_with("z3d", mock_paths[0])
         mock_reader_func.assert_called_once_with(mock_paths)
         assert result == "list_data"
 
