@@ -92,7 +92,7 @@ readers: dict[str, dict[str, Any]] = {
         "reader": lemi.read_lemi423,
     },
     "phoenix": {
-        "file_types": ["bin", "td_30", "td_150", "td_24k"],
+        "file_types": ["bin", "td_30", "td_150", "td_2400", "td_24k"],
         "reader": phoenix.read_phoenix,
     },
     "metronix": {
