@@ -182,7 +182,7 @@ class NIMSHeader:
         (run letter) removed.
         """
         if self.run_id is not None:
-            return self.run_id[0:-1]
+            return str(self.run_id[0:-1])
 
     @property
     def file_size(self) -> Optional[int]:
